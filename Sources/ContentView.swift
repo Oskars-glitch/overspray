@@ -59,7 +59,8 @@ struct ContentView: View {
                 HStack(alignment: .bottom) {
                     // colors + nozzle caps
                     VStack(spacing: 10) {
-                        ForEach(Array(PaintState.nozzles.enumerated().reversed()), id: \.offset) { i, nz in
+                        ForEach(PaintState.nozzles.indices.reversed(), id: \.self) { i in
+                            let nz = PaintState.nozzles[i]
                             Button(action: { state.nozzleIndex = i; state.showToast(nz.name) }) {
                                 ZStack {
                                     Circle().fill(.ultraThinMaterial).frame(width: 38, height: 38)
@@ -71,7 +72,8 @@ struct ContentView: View {
                             }
                         }
                         Rectangle().fill(Color.white.opacity(0.3)).frame(width: 26, height: 1)
-                        ForEach(Array(PaintState.colors.enumerated().reversed()), id: \.offset) { i, cc in
+                        ForEach(PaintState.colors.indices.reversed(), id: \.self) { i in
+                            let cc = PaintState.colors[i]
                             Button(action: { state.colorIndex = i }) {
                                 Circle()
                                     .fill(Color(cc.ui))

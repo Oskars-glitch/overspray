@@ -1,12 +1,13 @@
 import UIKit
 import ARKit
 import AVFoundation
+import AVKit
 import MediaPlayer
 import Photos
 
 // MARK: - Recorder: captures camera + paint (no UI) into a video in Photos
 
-final class Recorder {
+final class Recorder: NSObject {
     private var writer: AVAssetWriter?
     private var input: AVAssetWriterInput?
     private var adaptor: AVAssetWriterInputPixelBufferAdaptor?
@@ -146,7 +147,6 @@ final class VolumeSpray: NSObject {
             let interaction = AVCaptureEventInteraction(
                 primary: { [weak self] event in self?.captureEvent(event) },
                 secondary: { [weak self] event in self?.captureEvent(event) })
-            interaction.isEnabled = true
             view.addInteraction(interaction)
         }
     }
