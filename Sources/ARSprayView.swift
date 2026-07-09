@@ -4,8 +4,6 @@ import SceneKit
 import Metal
 import AVFoundation
 
-/// ARKit view: detects vertical planes and glues a paintable canvas onto each.
-/// Paint lands on the detected surface; distance is real metres.
 struct ARSprayView: UIViewRepresentable {
     let state: PaintState
 
@@ -15,12 +13,14 @@ struct ARSprayView: UIViewRepresentable {
         let view = ARSCNView(frame: .zero)
         view.delegate = context.coordinator
         view.session.delegate = context.coordinator
-        view.automaticallyUpdatesLighting = true
+        view.automaticallyUpdatesLighting = false      // we drive lighting ourselves
         view.rendersContinuously = true
         context.coordinator.arView = view
+        context.coordinator.setupLights()
         context.coordinator.runSession(reset: false)
         view.debugOptions = [.showFeaturePoints]
 
+        SoundKit.shared.setup()
         VolumeSpray.shared.attach(to: view, state: state)
         UIApplication.shared.isIdleTimerDisabled = true
         return view
@@ -38,10 +38,12 @@ struct ARSprayView: UIViewRepresentable {
         private var lastTime: TimeInterval = 0
         private var sprayPrev: (UUID, CGPoint)?
         private let device = MTLCreateSystemDefaultDevice()
-        private var enginesAllocated = 0
-        private var engineCapToastShown = false
+        private let tileBudget = TileBudget()
         private var camLight: SCNLight?
+        private var ambientLight: SCNLight?
         private var torchApplied = false
+        private var micEnabled = false
+        private var wasSpraying = false
         private var viewCenter = CGPoint(x: UIScreen.main.bounds.midX,
                                          y: UIScreen.main.bounds.midY)
 
@@ -52,7 +54,26 @@ struct ARSprayView: UIViewRepresentable {
             let config = ARWorldTrackingConfiguration()
             config.planeDetection = [.vertical]
             config.environmentTexturing = .none
+            config.providesAudioData = micEnabled     // mic only while recording
             view.session.run(config, options: reset ? [.resetTracking, .removeExistingAnchors] : [])
+            SoundKit.shared.reassertSession()
+            if state.torchOn {                        // session restarts can drop the torch
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.setTorch(true) }
+            }
+        }
+
+        /// Base ambient (subtle 5–10% response to real room light) is created
+        /// once; the camera spotlight powers the flashlight look on the paint.
+        func setupLights() {
+            guard let view = arView else { return }
+            let amb = SCNLight()
+            amb.type = .ambient
+            amb.intensity = 1000
+            amb.color = UIColor.white
+            let ambNode = SCNNode()
+            ambNode.light = amb
+            view.scene.rootNode.addChildNode(ambNode)
+            ambientLight = amb
         }
 
         // MARK: plane lifecycle
@@ -79,10 +100,16 @@ struct ARSprayView: UIViewRepresentable {
 
         func renderer(_ renderer: SCNSceneRenderer, didRemove node: SCNNode, for anchor: ARAnchor) {
             if let plane = anchor as? ARPlaneAnchor {
-                if surfaces[plane.identifier]?.engine != nil { enginesAllocated -= 1 }
+                surfaces[plane.identifier]?.teardown()
                 surfaces.removeValue(forKey: plane.identifier)
                 DispatchQueue.main.async { self.state.wallCount = self.surfaces.count }
             }
+        }
+
+        // MARK: microphone buffers from ARKit → recorder
+
+        func session(_ session: ARSession, didOutputAudioSampleBuffer audioSampleBuffer: CMSampleBuffer) {
+            recorder.appendAudio(audioSampleBuffer)
         }
 
         // MARK: per-frame tick (render thread)
@@ -107,6 +134,16 @@ struct ARSprayView: UIViewRepresentable {
             syncTorchAndLight()
 
             guard let view = arView, let frame = view.session.currentFrame else { return }
+
+            // subtle room-light response (≈ ±5–10%)
+            if let est = frame.lightEstimate {
+                let e = min(2000, max(200, est.ambientIntensity))
+                let target = 950 + 0.08 * e
+                if let amb = ambientLight {
+                    amb.intensity += (target - amb.intensity) * 0.05
+                }
+            }
+
             let camPos = frame.camera.transform.position
 
             var hit: (surface: PaintSurface, tex: CGPoint, dist: Double,
@@ -132,6 +169,11 @@ struct ARSprayView: UIViewRepresentable {
             }
 
             let spraying = state.spraying || VolumeSpray.shared.holding
+            if spraying != wasSpraying {
+                wasSpraying = spraying
+                DispatchQueue.main.async { SoundKit.shared.setSpraying(spraying) }
+            }
+
             if spraying, let h = hit {
                 if let engine = ensureEngine(h.surface) {
                     let color = PaintState.colors[state.colorIndex].ui.cgColor
@@ -150,30 +192,22 @@ struct ARSprayView: UIViewRepresentable {
 
             for s in surfaces.values {
                 s.engine?.stepDrips(dt: dt)
-                s.engine?.flush()          // dirty-rect GPU upload only
+                s.engine?.flush()
             }
         }
 
-        /// Canvases allocate lazily, only for walls you actually paint,
-        /// and at most 3 at once (memory care for older iPhones).
         private func ensureEngine(_ surface: PaintSurface) -> SprayEngine? {
             if let e = surface.engine { return e }
             guard let device = device else { return nil }
-            if enginesAllocated >= 3 {
-                if !engineCapToastShown {
-                    engineCapToastShown = true
-                    state.showToast("Three walls max — Rescan to start fresh")
-                }
-                return nil
+            surface.allocateEngine(device: device, budget: tileBudget) { [weak self] in
+                self?.state.showToast("Paint area limit reached — Clear or Rescan")
             }
-            if surface.allocateEngine(device: device) != nil { enginesAllocated += 1 }
             return surface.engine
         }
 
-        // MARK: flashlight + virtual light on the paint
+        // MARK: flashlight + wet reflection
 
         private func syncTorchAndLight() {
-            // virtual spotlight riding on the camera so the PAINT brightens too
             if camLight == nil, let pov = arView?.pointOfView {
                 let l = SCNLight()
                 l.type = .spot
@@ -188,7 +222,7 @@ struct ARSprayView: UIViewRepresentable {
                 pov.addChildNode(n)
                 camLight = l
             }
-            camLight?.intensity = state.torchOn ? 1700 : 0
+            camLight?.intensity = state.torchOn ? 1200 : 0
 
             if state.torchOn != torchApplied {
                 torchApplied = state.torchOn
@@ -214,22 +248,18 @@ struct ARSprayView: UIViewRepresentable {
         // MARK: rescan
 
         private func rescan() {
-            for s in surfaces.values { s.node.removeFromParentNode() }
+            for s in surfaces.values { s.teardown(); s.node.removeFromParentNode() }
             surfaces.removeAll()
-            enginesAllocated = 0
-            engineCapToastShown = false
+            tileBudget.warned = false
             sprayPrev = nil
             runSession(reset: true)
             arView?.debugOptions = [.showFeaturePoints]
             state.wallCount = 0
             state.status = "Move your phone slowly to scan for walls"
             state.showToast("Rescanning…")
-            if state.torchOn {   // session restart can drop the torch — reapply
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { self.setTorch(true) }
-            }
         }
 
-        // MARK: recording
+        // MARK: recording (mic switches on only while recording)
 
         private func toggleRecording() {
             guard let view = arView else { return }
@@ -241,7 +271,11 @@ struct ARSprayView: UIViewRepresentable {
                         else { self.state.showToast("Recording failed to save") }
                     }
                 }
+                micEnabled = false
+                runSession(reset: false)
             } else {
+                micEnabled = true
+                runSession(reset: false)          // same session, now with audio
                 recorder.start(view: view, state: state)
                 state.isRecording = true
             }
@@ -249,62 +283,52 @@ struct ARSprayView: UIViewRepresentable {
     }
 }
 
-// MARK: - PaintSurface: a canvas glued to one detected wall
+// MARK: - PaintSurface: one detected wall
 
-/// A 3 m × 3 m, 4096 px paint canvas (≈1365 px/m — 2.7× finer than before),
-/// centred on the plane anchor. Lit (lambert) so it reacts to the flashlight
-/// and the room's estimated light.
+/// 3 m × 3 m surface whose paint lives in lazy 0.5 m tiles (4096 px/m).
 final class PaintSurface {
     static let sizeMeters: CGFloat = 3.0
-    static let texSize = 4096
-    static var ppm: CGFloat { CGFloat(texSize) / sizeMeters }
 
     let id: UUID
-    let node: SCNNode
+    let node: SCNNode                      // paint root, rotated into the wall
     private(set) var engine: SprayEngine?
-    private let material: SCNMaterial
+    private var canvas: PaintCanvas?
     private var anchorTransform: simd_float4x4
     private let dripDirLocal: CGVector
 
     init(anchor: ARPlaneAnchor) {
         id = anchor.identifier
         anchorTransform = anchor.transform
-
-        let geo = SCNPlane(width: PaintSurface.sizeMeters, height: PaintSurface.sizeMeters)
-        material = SCNMaterial()
-        material.lightingModel = .lambert
-        material.isDoubleSided = false
-        material.transparencyMode = .aOne
-        material.diffuse.contents = UIColor.clear
-        geo.materials = [material]
-
-        node = SCNNode(geometry: geo)
+        node = SCNNode()
         node.eulerAngles.x = -.pi / 2
 
-        // real-world DOWN expressed on the wall texture, so drips fall true
         let downLocal = anchor.transform.inverse * simd_float4(0, -1, 0, 0)
         dripDirLocal = CGVector(dx: CGFloat(downLocal.x), dy: CGFloat(downLocal.z))
     }
 
     func updateTransform(_ t: simd_float4x4) { anchorTransform = t }
 
-    @discardableResult
-    func allocateEngine(device: MTLDevice) -> SprayEngine? {
-        guard engine == nil else { return engine }
-        engine = SprayEngine(texSize: PaintSurface.texSize,
-                             ppm: PaintSurface.ppm,
-                             dripDirection: dripDirLocal,
-                             device: device)
-        if let e = engine { material.diffuse.contents = e.texture }
-        return engine
+    func allocateEngine(device: MTLDevice, budget: TileBudget, onBudgetExceeded: @escaping () -> Void) {
+        guard engine == nil else { return }
+        let c = PaintCanvas(surfaceMeters: PaintSurface.sizeMeters,
+                            device: device, budget: budget, parent: node)
+        c.onBudgetExceeded = onBudgetExceeded
+        canvas = c
+        engine = SprayEngine(canvas: c, dripDirection: dripDirLocal)
     }
 
-    /// anchor-local hit → texture pixel (nil if outside the canvas)
+    func teardown() {
+        canvas?.teardown()
+        canvas = nil
+        engine = nil
+    }
+
+    /// anchor-local hit → surface pixel (nil if outside the canvas)
     func texturePoint(worldPoint: simd_float3) -> CGPoint? {
         let local = anchorTransform.inverse * vec4(worldPoint, 1)
         let half = Float(PaintSurface.sizeMeters / 2)
         guard abs(local.x) < half, abs(local.z) < half else { return nil }
-        let ppm = Float(PaintSurface.ppm)
+        let ppm = Float(PaintCanvas.ppm)
         return CGPoint(x: CGFloat((local.x + half) * ppm),
                        y: CGFloat((local.z + half) * ppm))
     }
@@ -312,7 +336,7 @@ final class PaintSurface {
     /// How obliquely the spray hits: (elongation factor, direction on texture)
     func obliqueness(rayDir: simd_float3) -> (CGFloat, CGVector) {
         let col = anchorTransform.columns.1
-        let n = simd_normalize(simd_float3(col.x, col.y, col.z))   // plane normal
+        let n = simd_normalize(simd_float3(col.x, col.y, col.z))
         let c = Double(abs(simd_dot(rayDir, n)))
         let stretch = CGFloat(min(3.0, 1.0 / max(0.34, c)))
         var t = rayDir - n * simd_dot(rayDir, n)

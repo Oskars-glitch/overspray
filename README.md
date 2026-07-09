@@ -81,3 +81,22 @@ result from your Big Sur Mac with Sideloadly.
   UI, and saves to Photos on stop.
 - Every detected wall gets its own 4 m × 4 m paint canvas glued to it —
   you can paint several walls in one session. "Clear wall" clears all.
+
+## Sounds (optional)
+
+Drop your MP3s straight into the `Sources` folder next to the Swift files:
+
+- `spray_01.mp3`, `spray_02.mp3`, `spray_03.mp3` (or a single `spray.mp3`)
+  — a random one loops while you hold the cap or volume-down
+- `shake_01.mp3`, `shake_02.mp3`, `shake_03.mp3` (or `shake.mp3`)
+  — a random one plays when you physically shake the phone (works
+  mid-spray too)
+
+A different variant is picked each time so it never sounds looped/fake.
+Missing files are fine — the app simply stays silent.
+
+## Recording with sound
+
+Recordings now include the microphone (ambient room sound). The mic only
+switches on while you're recording; iOS will ask permission the first
+time you press record.

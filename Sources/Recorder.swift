@@ -5,16 +5,17 @@ import AVKit
 import MediaPlayer
 import Photos
 
-// MARK: - Recorder: captures camera + paint (no UI) into a video in Photos
+// MARK: - Recorder: camera + paint video WITH ambient microphone sound
 
 final class Recorder: NSObject {
     private var writer: AVAssetWriter?
-    private var input: AVAssetWriterInput?
+    private var videoInput: AVAssetWriterInput?
+    private var audioInput: AVAssetWriterInput?
     private var adaptor: AVAssetWriterInputPixelBufferAdaptor?
     private var displayLink: CADisplayLink?
     private weak var view: ARSCNView?
     private weak var state: PaintState?
-    private var startTime: CFTimeInterval = 0
+    private var startHostTime: CFTimeInterval = 0
     private var size = CGSize.zero
     private(set) var isRecording = false
 
@@ -25,7 +26,6 @@ final class Recorder: NSObject {
         let scale = min(UIScreen.main.scale, 2)
         size = CGSize(width: (view.bounds.width * scale).rounded(.down),
                       height: (view.bounds.height * scale).rounded(.down))
-        // even dimensions for H.264
         size.width -= size.width.truncatingRemainder(dividingBy: 2)
         size.height -= size.height.truncatingRemainder(dividingBy: 2)
 
@@ -33,26 +33,40 @@ final class Recorder: NSObject {
             .appendingPathComponent("overspray-\(Int(Date().timeIntervalSince1970)).mp4")
         try? FileManager.default.removeItem(at: url)
         guard let w = try? AVAssetWriter(outputURL: url, fileType: .mp4) else { return }
-        let settings: [String: Any] = [
+
+        let vSettings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: Int(size.width),
             AVVideoHeightKey: Int(size.height),
             AVVideoCompressionPropertiesKey: [AVVideoAverageBitRateKey: 8_000_000],
         ]
-        let inp = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
-        inp.expectsMediaDataInRealTime = true
+        let vi = AVAssetWriterInput(mediaType: .video, outputSettings: vSettings)
+        vi.expectsMediaDataInRealTime = true
         let ad = AVAssetWriterInputPixelBufferAdaptor(
-            assetWriterInput: inp,
+            assetWriterInput: vi,
             sourcePixelBufferAttributes: [
                 kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
                 kCVPixelBufferWidthKey as String: Int(size.width),
                 kCVPixelBufferHeightKey as String: Int(size.height),
             ])
-        w.add(inp)
-        writer = w; input = inp; adaptor = ad
+        w.add(vi)
+
+        // ambient sound from the microphone (buffers arrive via ARKit)
+        let aSettings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: 44_100,
+            AVNumberOfChannelsKey: 1,
+            AVEncoderBitRateKey: 96_000,
+        ]
+        let ai = AVAssetWriterInput(mediaType: .audio, outputSettings: aSettings)
+        ai.expectsMediaDataInRealTime = true
+        if w.canAdd(ai) { w.add(ai); audioInput = ai }
+
+        writer = w; videoInput = vi; adaptor = ad
         w.startWriting()
-        w.startSession(atSourceTime: .zero)
-        startTime = CACurrentMediaTime()
+        // host-clock timeline so mic sample buffers line up with our video frames
+        startHostTime = CACurrentMediaTime()
+        w.startSession(atSourceTime: CMTime(seconds: startHostTime, preferredTimescale: 600))
         isRecording = true
 
         let link = CADisplayLink(target: self, selector: #selector(tick))
@@ -61,13 +75,18 @@ final class Recorder: NSObject {
         displayLink = link
     }
 
-    @objc private func tick() {
-        guard isRecording, let view = view, let input = input, let adaptor = adaptor,
-              input.isReadyForMoreMediaData, let pool = adaptor.pixelBufferPool else { return }
-        let elapsed = CACurrentMediaTime() - startTime
-        DispatchQueue.main.async { self.state?.recordSeconds = Int(elapsed) }
+    /// Called by the AR session delegate with microphone sample buffers.
+    func appendAudio(_ sampleBuffer: CMSampleBuffer) {
+        guard isRecording, let ai = audioInput, ai.isReadyForMoreMediaData else { return }
+        ai.append(sampleBuffer)
+    }
 
-        // snapshot renders camera feed + SceneKit paint, but NOT the UIKit/SwiftUI overlay
+    @objc private func tick() {
+        guard isRecording, let view = view, let vi = videoInput, let adaptor = adaptor,
+              vi.isReadyForMoreMediaData, let pool = adaptor.pixelBufferPool else { return }
+        let now = CACurrentMediaTime()
+        DispatchQueue.main.async { self.state?.recordSeconds = Int(now - self.startHostTime) }
+
         let image = view.snapshot()
         guard let cg = image.cgImage else { return }
         var pb: CVPixelBuffer?
@@ -84,15 +103,15 @@ final class Recorder: NSObject {
             ctx.draw(cg, in: CGRect(origin: .zero, size: size))
         }
         CVPixelBufferUnlockBaseAddress(buffer, [])
-        let t = CMTime(seconds: elapsed, preferredTimescale: 600)
-        adaptor.append(buffer, withPresentationTime: t)
+        adaptor.append(buffer, withPresentationTime: CMTime(seconds: now, preferredTimescale: 600))
     }
 
     func stop(completion: @escaping (URL?) -> Void) {
-        guard isRecording, let writer = writer, let input = input else { completion(nil); return }
+        guard isRecording, let writer = writer, let vi = videoInput else { completion(nil); return }
         isRecording = false
         displayLink?.invalidate(); displayLink = nil
-        input.markAsFinished()
+        vi.markAsFinished()
+        audioInput?.markAsFinished()
         let url = writer.outputURL
         writer.finishWriting {
             PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
@@ -102,18 +121,12 @@ final class Recorder: NSObject {
                 }) { ok, _ in completion(ok ? url : nil) }
             }
         }
-        self.writer = nil; self.input = nil; self.adaptor = nil
+        self.writer = nil; self.videoInput = nil; self.audioInput = nil; self.adaptor = nil
     }
 }
 
-// MARK: - VolumeSpray: hold volume-down to spray
+// MARK: - VolumeSpray: hold volume-down to spray (unchanged behaviour)
 
-/// Two mechanisms, best available wins:
-/// 1. iOS 17.2+ AVCaptureEventInteraction (Apple's official camera-button API)
-/// 2. Classic fallback: observe system volume changes; holding volume-down
-///    fires repeated changes → treated as "holding". A hidden MPVolumeView
-///    suppresses the system volume HUD and lets us reset the level so the
-///    button never bottoms out.
 final class VolumeSpray: NSObject {
     static let shared = VolumeSpray()
     private(set) var holding = false
@@ -126,23 +139,17 @@ final class VolumeSpray: NSObject {
 
     func attach(to view: UIView, state: PaintState) {
         self.state = state
-
-        // hidden volume view keeps the system HUD away
         let vv = MPVolumeView(frame: CGRect(x: -2000, y: -2000, width: 1, height: 1))
         vv.alpha = 0.01
         view.addSubview(vv)
         volumeView = vv
 
         let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.ambient, options: [.mixWithOthers])
-        try? session.setActive(true)
         observation = session.observe(\.outputVolume, options: [.new, .old]) { [weak self] _, change in
             guard let self, !self.suppressObservation else { return }
             guard let new = change.newValue, let old = change.oldValue, new <= old else { return }
             self.pulse()
         }
-
-        // official camera-button API where available
         if #available(iOS 17.2, *) {
             let interaction = AVCaptureEventInteraction(
                 primary: { [weak self] event in self?.captureEvent(event) },
@@ -160,14 +167,12 @@ final class VolumeSpray: NSObject {
         }
     }
 
-    /// A volume-down change arrived: hold spraying until changes stop coming.
     private func pulse() {
         setHolding(true)
         releaseTimer?.invalidate()
         releaseTimer = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: false) { [weak self] _ in
             self?.setHolding(false)
         }
-        // nudge the volume back up so holding the button keeps producing events
         resetWorkItem?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self, let slider = self.volumeView?.subviews

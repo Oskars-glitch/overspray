@@ -21,7 +21,7 @@ targets:
         CFBundleDisplayName: Overspray
         NSCameraUsageDescription: "The camera shows the wall you are spray painting in AR."
         NSPhotoLibraryAddUsageDescription: "Saves your recorded spray-painting videos to Photos."
-        NSMicrophoneUsageDescription: "Not used, required placeholder."
+        NSMicrophoneUsageDescription: "Records the sound around you into your spray videos."
         UIRequiredDeviceCapabilities: [arkit]
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         UIViewControllerBasedStatusBarAppearance: false
