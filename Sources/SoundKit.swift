@@ -15,8 +15,6 @@ final class SoundKit {
     private var sprayPlayer: AVAudioPlayer?
     private var oneShots: [AVAudioPlayer] = []
     private let motion = CMMotionManager()
-    private var shakeHits: [TimeInterval] = []
-    private var lastShakePlay: TimeInterval = 0
 
     func setup() {
         reassertSession()
@@ -53,6 +51,13 @@ final class SoundKit {
     }
 
     // MARK: shake detection (CoreMotion — works even mid-spray)
+    // Two tiers: hard shakes play full volume, gentle rattles play at 50%.
+    // While shaking continues, a new random variant chains on immediately —
+    // so continuous shaking sounds like a continuous rattle, never a loop.
+
+    private var strongHits: [TimeInterval] = []
+    private var softHits: [TimeInterval] = []
+    private var currentShake: AVAudioPlayer?
 
     private func startShakeDetection() {
         guard motion.isDeviceMotionAvailable else { return }
@@ -62,23 +67,24 @@ final class SoundKit {
             let a = dm.userAcceleration
             let mag = sqrt(a.x * a.x + a.y * a.y + a.z * a.z)
             let now = ProcessInfo.processInfo.systemUptime
-            if mag > 1.6 {
-                self.shakeHits.append(now)
-                self.shakeHits.removeAll { now - $0 > 0.7 }
-                if self.shakeHits.count >= 3, now - self.lastShakePlay > 1.1 {
-                    self.lastShakePlay = now
-                    self.shakeHits.removeAll()
-                    self.playShake()
-                }
+            if mag > 1.5 { self.strongHits.append(now) }
+            else if mag > 0.7 { self.softHits.append(now) }
+            self.strongHits.removeAll { now - $0 > 0.5 }
+            self.softHits.removeAll { now - $0 > 0.5 }
+            let strong = self.strongHits.count >= 2
+            let soft = self.softHits.count >= 2
+            if (strong || soft), self.currentShake?.isPlaying != true {
+                self.playShake(volume: strong ? 1.0 : 0.5)
             }
         }
     }
 
-    private func playShake() {
+    private func playShake(volume: Float) {
         guard let url = shakeURLs.randomElement() else { return }
         guard let p = try? AVAudioPlayer(contentsOf: url) else { return }
-        p.volume = 1.0
+        p.volume = volume
         p.play()
+        currentShake = p
         oneShots.append(p)
         oneShots.removeAll { !$0.isPlaying && $0 !== p }
     }

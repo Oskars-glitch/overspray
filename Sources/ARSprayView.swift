@@ -42,7 +42,6 @@ struct ARSprayView: UIViewRepresentable {
         private var camLight: SCNLight?
         private var ambientLight: SCNLight?
         private var torchApplied = false
-        private var micEnabled = false
         private var wasSpraying = false
         private var viewCenter = CGPoint(x: UIScreen.main.bounds.midX,
                                          y: UIScreen.main.bounds.midY)
@@ -54,9 +53,7 @@ struct ARSprayView: UIViewRepresentable {
             let config = ARWorldTrackingConfiguration()
             config.planeDetection = [.vertical]
             config.environmentTexturing = .none
-            config.providesAudioData = micEnabled     // mic only while recording
             view.session.run(config, options: reset ? [.resetTracking, .removeExistingAnchors] : [])
-            SoundKit.shared.reassertSession()
             if state.torchOn {                        // session restarts can drop the torch
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.setTorch(true) }
             }
@@ -106,12 +103,6 @@ struct ARSprayView: UIViewRepresentable {
             }
         }
 
-        // MARK: microphone buffers from ARKit → recorder
-
-        func session(_ session: ARSession, didOutputAudioSampleBuffer audioSampleBuffer: CMSampleBuffer) {
-            recorder.appendAudio(audioSampleBuffer)
-        }
-
         // MARK: per-frame tick (render thread)
 
         func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
@@ -135,10 +126,10 @@ struct ARSprayView: UIViewRepresentable {
 
             guard let view = arView, let frame = view.session.currentFrame else { return }
 
-            // subtle room-light response (≈ ±5–10%)
+            // barely-there room-light response (≈ ±2%)
             if let est = frame.lightEstimate {
                 let e = min(2000, max(200, est.ambientIntensity))
-                let target = 950 + 0.08 * e
+                let target = 985 + 0.02 * e
                 if let amb = ambientLight {
                     amb.intensity += (target - amb.intensity) * 0.05
                 }
@@ -259,7 +250,7 @@ struct ARSprayView: UIViewRepresentable {
             state.showToast("Rescanning…")
         }
 
-        // MARK: recording (mic switches on only while recording)
+        // MARK: recording (mic runs on its own session — AR camera untouched)
 
         private func toggleRecording() {
             guard let view = arView else { return }
@@ -271,13 +262,10 @@ struct ARSprayView: UIViewRepresentable {
                         else { self.state.showToast("Recording failed to save") }
                     }
                 }
-                micEnabled = false
-                runSession(reset: false)
             } else {
-                micEnabled = true
-                runSession(reset: false)          // same session, now with audio
-                recorder.start(view: view, state: state)
-                state.isRecording = true
+                recorder.start(view: view, state: state) { started in
+                    self.state.isRecording = started
+                }
             }
         }
     }

@@ -33,7 +33,7 @@ final class PaintState: ObservableObject {
     var rescanRequested = false
 
     static let colors: [(name: String, ui: UIColor)] = [
-        ("Black", UIColor(red: 0.09, green: 0.09, blue: 0.10, alpha: 1)),   // ~91% dark, like real paint
+        ("Black", UIColor(red: 0.02, green: 0.02, blue: 0.025, alpha: 1)),  // ~98% dark
         ("White", UIColor(red: 0.96, green: 0.95, blue: 0.93, alpha: 1)),
     ]
     // spray-can caps: half-angle in degrees + density factor (skinny = denser)

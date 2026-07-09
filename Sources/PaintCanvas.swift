@@ -57,14 +57,22 @@ final class PaintCanvas {
                             mipmapLevel: 0, withBytes: data, bytesPerRow: bpr)
             }
 
-            // wet-paint look: lit + specular highlight when you face it head-on
+            // wet-paint look: specular sheen ONLY on the paint (masked by its
+            // alpha) and ONLY from close up (fades out past ~0.9 m)
             let material = SCNMaterial()
             material.lightingModel = .blinn
             material.diffuse.contents = tex
-            material.specular.contents = UIColor(white: 0.45, alpha: 1)
-            material.shininess = 18
+            material.specular.contents = UIColor(white: 0.5, alpha: 1)
+            material.shininess = 24
             material.isDoubleSided = false
             material.transparencyMode = .aOne
+            material.shaderModifiers = [
+                .surface: """
+                float camDist = length(_surface.position);
+                float closeFade = clamp((0.9 - camDist) / 0.5, 0.0, 1.0);
+                _surface.specular.rgb = _surface.specular.rgb * _surface.diffuse.a * closeFade;
+                """
+            ]
             let geo = SCNPlane(width: PaintCanvas.tileMeters, height: PaintCanvas.tileMeters)
             geo.materials = [material]
             node = SCNNode(geometry: geo)

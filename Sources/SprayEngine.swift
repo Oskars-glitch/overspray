@@ -94,29 +94,32 @@ final class SprayEngine {
         }
 
         // OPAQUE dot field: density carries the look, never transparency.
-        // Close: many tight dots (reads solid) · far: sparse wide speckle.
+        // Close: few but PRECISE tight dots (crisp round cluster, no strays).
+        // Far: finer dots scattered wide, plus stray splatter.
         let close = min(1, max(0, (0.85 - d) / 0.85))
-        let sigma = R * (0.40 + 0.34 * (1 - close))
-        var count = Int((26 + 100 * close) * k)
-        count = min(count, max(20, 900 / budgetShare))   // frame budget on fast sweeps
+        let sigma = R * (0.30 + 0.50 * (1 - close))
+        var count = Int((60 + 240 * close) * k)
+        count = min(count, max(30, 1400 / budgetShare))  // frame budget on fast sweeps
         let mm = ppm / 1000
 
         for _ in 0..<count {
             let p = place(gaussRnd() * sigma, gaussRnd() * sigma)
-            let r = (0.35 + rnd() * rnd() * 1.5) * (1 + d * 0.6) * mm
-            canvas.fillDot(p.x, p.y, max(1.0, r), color)
+            let r = (0.10 + rnd() * rnd() * 0.45) * (1 + d * 0.5) * mm
+            canvas.fillDot(p.x, p.y, max(0.9, r), color)
         }
-        // stray splatter beyond the cone — more of it when far
-        let spl = 2 + Int((3 * d).rounded())
-        for _ in 0..<spl {
-            let a = rnd() * .pi * 2, rr = R * (1.15 + rnd() * 1.4)
-            let p = place(cos(a) * rr, sin(a) * rr)
-            canvas.fillDot(p.x, p.y, max(1.0, (0.4 + rnd() * 1.2) * mm * (1 + d * 0.5)), color)
+        // stray splatter only appears from a distance — up close the cone is tight
+        if d > 0.35 {
+            let spl = Int((3 * d).rounded())
+            for _ in 0..<spl {
+                let a = rnd() * .pi * 2, rr = R * (1.15 + rnd() * 1.4)
+                let p = place(cos(a) * rr, sin(a) * rr)
+                canvas.fillDot(p.x, p.y, max(0.9, (0.15 + rnd() * 0.4) * mm * (1 + d * 0.5)), color)
+            }
         }
-        // occasional fat spit
-        if rnd() < 0.08 {
+        // occasional fat spit (also not at point-blank range)
+        if d > 0.3, rnd() < 0.06 {
             let p = place(gaussRnd() * R * 0.8, gaussRnd() * R * 0.8)
-            canvas.fillDot(p.x, p.y, (1.2 + rnd() * 2.2) * mm * 2, color)
+            canvas.fillDot(p.x, p.y, (0.5 + rnd() * 0.9) * mm * 2, color)
         }
 
         accumulate(at: c, d: d, k: k, R: R, color: color,

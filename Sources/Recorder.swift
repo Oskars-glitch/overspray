@@ -7,8 +7,10 @@ import Photos
 
 // MARK: - Recorder: camera + paint video WITH ambient microphone sound
 
-final class Recorder: NSObject {
+final class Recorder: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
     private var writer: AVAssetWriter?
+    private var captureSession: AVCaptureSession?
+    private let audioQueue = DispatchQueue(label: "overspray.mic")
     private var videoInput: AVAssetWriterInput?
     private var audioInput: AVAssetWriterInput?
     private var adaptor: AVAssetWriterInputPixelBufferAdaptor?
@@ -19,10 +21,21 @@ final class Recorder: NSObject {
     private var size = CGSize.zero
     private(set) var isRecording = false
 
-    func start(view: ARSCNView, state: PaintState) {
-        guard !isRecording else { return }
+    func start(view: ARSCNView, state: PaintState, completion: @escaping (Bool) -> Void) {
+        guard !isRecording else { completion(false); return }
+        AVCaptureDevice.requestAccess(for: .audio) { granted in
+            DispatchQueue.main.async {
+                self.begin(view: view, state: state, mic: granted)
+                if !granted { state.showToast("Recording without sound — allow the microphone in Settings") }
+                completion(true)
+            }
+        }
+    }
+
+    private func begin(view: ARSCNView, state: PaintState, mic: Bool) {
         self.view = view
         self.state = state
+        SoundKit.shared.reassertSession()
         let scale = min(UIScreen.main.scale, 2)
         size = CGSize(width: (view.bounds.width * scale).rounded(.down),
                       height: (view.bounds.height * scale).rounded(.down))
@@ -73,10 +86,27 @@ final class Recorder: NSObject {
         link.preferredFramesPerSecond = 30
         link.add(to: .main, forMode: .common)
         displayLink = link
+
+        if mic { startMic() }
     }
 
-    /// Called by the AR session delegate with microphone sample buffers.
-    func appendAudio(_ sampleBuffer: CMSampleBuffer) {
+    /// The mic runs on its OWN capture session, fully independent of ARKit —
+    /// starting a recording never touches (or freezes) the AR camera.
+    private func startMic() {
+        let cap = AVCaptureSession()
+        guard let dev = AVCaptureDevice.default(for: .audio),
+              let input = try? AVCaptureDeviceInput(device: dev),
+              cap.canAddInput(input) else { return }
+        cap.addInput(input)
+        let out = AVCaptureAudioDataOutput()
+        out.setSampleBufferDelegate(self, queue: audioQueue)
+        if cap.canAddOutput(out) { cap.addOutput(out) }
+        captureSession = cap
+        audioQueue.async { cap.startRunning() }
+    }
+
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer,
+                       from connection: AVCaptureConnection) {
         guard isRecording, let ai = audioInput, ai.isReadyForMoreMediaData else { return }
         ai.append(sampleBuffer)
     }
@@ -110,6 +140,8 @@ final class Recorder: NSObject {
         guard isRecording, let writer = writer, let vi = videoInput else { completion(nil); return }
         isRecording = false
         displayLink?.invalidate(); displayLink = nil
+        captureSession?.stopRunning()
+        captureSession = nil
         vi.markAsFinished()
         audioInput?.markAsFinished()
         let url = writer.outputURL
