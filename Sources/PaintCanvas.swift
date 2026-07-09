@@ -62,7 +62,7 @@ final class PaintCanvas {
             let material = SCNMaterial()
             material.lightingModel = .blinn
             material.diffuse.contents = tex
-            material.specular.contents = UIColor(white: 0.18, alpha: 1)
+            material.specular.contents = UIColor(white: 0.23, alpha: 1)
             material.shininess = 24
             material.isDoubleSided = false
             material.transparencyMode = .aOne

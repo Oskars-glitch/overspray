@@ -81,13 +81,13 @@ final class SprayEngine {
             stamp(at: p, d: CGFloat(d), k: k, R: CGFloat(radius), color: color,
                   dtShare: dt / Double(stamps), still: CGFloat(still),
                   stretch: stretch, sd: stretchDir,
-                  budgetShare: max(1, stamps))
+                  budgetShare: max(1, stamps), coneDeg: coneDeg)
         }
     }
 
     private func stamp(at c: CGPoint, d: CGFloat, k: CGFloat, R: CGFloat,
                        color: CGColor, dtShare: Double, still: CGFloat,
-                       stretch: CGFloat, sd: CGVector, budgetShare: Int) {
+                       stretch: CGFloat, sd: CGVector, budgetShare: Int, coneDeg: Double) {
         @inline(__always) func place(_ ox: CGFloat, _ oy: CGFloat) -> CGPoint {
             CGPoint(x: c.x + sd.dx * ox * stretch - sd.dy * oy,
                     y: c.y + sd.dy * ox * stretch + sd.dx * oy)
@@ -98,8 +98,8 @@ final class SprayEngine {
         // Far: finer dots scattered wide, plus stray splatter.
         let close = min(1, max(0, (0.85 - d) / 0.85))
         let sigma = R * (0.30 + 0.50 * (1 - close))
-        var count = Int((60 + 240 * close) * k * 2)      // 2× paint flow
-        count = min(count, max(40, 2000 / budgetShare))  // frame budget on fast sweeps
+        var count = Int((60 + 240 * close) * k * 5)      // 5× paint flow
+        count = min(count, max(80, 4500 / budgetShare))  // frame budget on fast sweeps
         let mm = ppm / 1000
 
         for _ in 0..<count {
@@ -123,25 +123,27 @@ final class SprayEngine {
         }
 
         accumulate(at: c, d: d, k: k, R: R, color: color,
-                   dtShare: dtShare, still: still, stretch: stretch, sd: sd)
+                   dtShare: dtShare, still: still, stretch: stretch, sd: sd, coneDeg: coneDeg)
     }
 
     // MARK: accumulation → drips
 
     private func accumulate(at c: CGPoint, d: CGFloat, k: CGFloat, R: CGFloat,
                             color: CGColor, dtShare: Double, still: CGFloat,
-                            stretch: CGFloat, sd: CGVector) {
+                            stretch: CGFloat, sd: CGVector, coneDeg: Double) {
         guard still > 0.01 else { return }
-        // drips are a CLOSE-range phenomenon: full inside ~0.3 m, gone by ~0.9 m —
-        // distant mist stays dry no matter how long you spray
-        let dripGate = pow(min(1.0, max(0.0, (0.9 - Double(d)) / 0.6)), 1.5)
+        // drips only from the SKINNY cap (tight caps concentrate paint into runs;
+        // wider caps disperse it and never drip) and only up close
+        guard coneDeg <= 3.0 else { return }
+        // full inside ~0.22 m, gone by ~0.6 m — even closer-ranged than before
+        let dripGate = pow(min(1.0, max(0.0, (0.6 - Double(d)) / 0.38)), 1.8)
         guard dripGate > 0.02 else { return }
         let wet = R * 0.62
         let wetEff = max(wet, cellPx * 0.75)
         let bound = wetEff * max(1, stretch)
         let localR = max(0.10 * ppm, wet * 2.3)
-        let localMax = 3
-        let flux = Float(min(16.0, 5.0 * Double(k) / Double(d * d)) * Double(still) * dripGate)
+        let localMax = 2
+        let flux = Float(min(16.0, 5.0 * Double(k) / Double(d * d)) * Double(still) * dripGate * 0.5)
         let g0x = max(0, Int((c.x - bound) / cellPx))
         let g1x = min(grid - 1, Int((c.x + bound) / cellPx))
         let g0y = max(0, Int((c.y - bound) / cellPx))
@@ -176,7 +178,7 @@ final class SprayEngine {
                     if nearCount > 0 {
                         if rnd() < 0.10, let ni = near {
                             let extra = vol * (0.005 + rnd() * 0.012) * ppm
-                            drips[ni].budget = min(0.30 * ppm, drips[ni].budget + extra)
+                            drips[ni].budget = min(0.18 * ppm, drips[ni].budget + extra)
                             drips[ni].vol = min(3.0, drips[ni].vol + 0.10)
                         } else if nearCount < localMax, rnd() < 0.05, drips.count < 60 {
                             spawnDrip(x: cx, y: cy, vol: vol, color: color)
@@ -195,7 +197,7 @@ final class SprayEngine {
             origin: CGPoint(x: x, y: y),
             pos: CGPoint(x: x + gaussRnd() * 0.003 * ppm, y: y),
             vol: vol,
-            budget: vol * (0.012 + rnd() * 0.030) * ppm,
+            budget: vol * (0.008 + rnd() * 0.020) * ppm,
             width: max(2.0, (0.0012 + vol * 0.0011) * (0.75 + rnd() * 0.5) * ppm),
             wobble: 0.03 + rnd() * 0.15,
             seed: rnd() * 100,
