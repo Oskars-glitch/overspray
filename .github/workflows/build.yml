@@ -1,23 +1,46 @@
 name: Build Overspray IPA
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
+      - name: Show what got uploaded
+        run: |
+          echo "=== repo root ==="
+          ls -la
+          echo "=== Sources ==="
+          ls -la Sources || echo "NO Sources FOLDER — upload it"
+          echo "=== project.yml ==="
+          cat project.yml || echo "NO project.yml — upload it"
+
+      - name: Select latest Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+
       - name: Install XcodeGen
-        run: brew install xcodegen
+        run: |
+          export HOMEBREW_NO_REQUIRE_TAP_TRUST=1
+          brew install xcodegen || {
+            echo "brew failed, downloading XcodeGen release directly"
+            curl -L -o xcodegen.zip https://github.com/yonaskolb/XcodeGen/releases/download/2.42.0/xcodegen.zip
+            unzip -q xcodegen.zip
+            sudo mkdir -p /usr/local/bin
+            sudo cp xcodegen/bin/xcodegen /usr/local/bin/xcodegen 2>/dev/null || true
+            sudo cp -r xcodegen/share /usr/local/share 2>/dev/null || true
+          }
+          which xcodegen && xcodegen --version
 
       - name: Generate Xcode project
         run: xcodegen generate
 
       - name: Build (unsigned)
         run: |
+          set -o pipefail
           xcodebuild -project Overspray.xcodeproj \
             -scheme Overspray \
             -configuration Release \
@@ -25,6 +48,7 @@ jobs:
             -destination 'generic/platform=iOS' \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
             BUILD_DIR=build \
             build
 
