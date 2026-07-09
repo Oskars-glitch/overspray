@@ -38,7 +38,7 @@ final class PaintState: ObservableObject {
     ]
     // spray-can caps: half-angle in degrees + density factor (skinny = denser)
     static let nozzles: [(deg: Double, dot: CGFloat, name: String)] = [
-        (2.2, 6, "Skinny cap"), (4.5, 10, "Standard cap"), (8.0, 16, "Fat cap"),
+        (2.2, 6, "Skinny cap"), (6.5, 10, "Standard cap"), (13.0, 16, "Fat cap"),
     ]
 
     func showToast(_ msg: String) {

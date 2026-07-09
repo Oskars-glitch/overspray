@@ -62,15 +62,16 @@ final class PaintCanvas {
             let material = SCNMaterial()
             material.lightingModel = .blinn
             material.diffuse.contents = tex
-            material.specular.contents = UIColor(white: 0.5, alpha: 1)
+            material.specular.contents = UIColor(white: 0.18, alpha: 1)
             material.shininess = 24
             material.isDoubleSided = false
             material.transparencyMode = .aOne
             material.shaderModifiers = [
                 .surface: """
                 float camDist = length(_surface.position);
-                float closeFade = clamp((0.9 - camDist) / 0.5, 0.0, 1.0);
-                _surface.specular.rgb = _surface.specular.rgb * _surface.diffuse.a * closeFade;
+                float near = clamp((1.6 - camDist) / 1.2, 0.0, 1.0);
+                _surface.shininess = 4.0 + 70.0 * near * near;
+                _surface.specular.rgb = _surface.specular.rgb * _surface.diffuse.a * (0.35 + 0.65 * near);
                 """
             ]
             let geo = SCNPlane(width: PaintCanvas.tileMeters, height: PaintCanvas.tileMeters)

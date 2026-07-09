@@ -98,8 +98,8 @@ final class SprayEngine {
         // Far: finer dots scattered wide, plus stray splatter.
         let close = min(1, max(0, (0.85 - d) / 0.85))
         let sigma = R * (0.30 + 0.50 * (1 - close))
-        var count = Int((60 + 240 * close) * k)
-        count = min(count, max(30, 1400 / budgetShare))  // frame budget on fast sweeps
+        var count = Int((60 + 240 * close) * k * 2)      // 2× paint flow
+        count = min(count, max(40, 2000 / budgetShare))  // frame budget on fast sweeps
         let mm = ppm / 1000
 
         for _ in 0..<count {
@@ -132,12 +132,16 @@ final class SprayEngine {
                             color: CGColor, dtShare: Double, still: CGFloat,
                             stretch: CGFloat, sd: CGVector) {
         guard still > 0.01 else { return }
+        // drips are a CLOSE-range phenomenon: full inside ~0.3 m, gone by ~0.9 m —
+        // distant mist stays dry no matter how long you spray
+        let dripGate = pow(min(1.0, max(0.0, (0.9 - Double(d)) / 0.6)), 1.5)
+        guard dripGate > 0.02 else { return }
         let wet = R * 0.62
         let wetEff = max(wet, cellPx * 0.75)
         let bound = wetEff * max(1, stretch)
         let localR = max(0.10 * ppm, wet * 2.3)
         let localMax = 3
-        let flux = Float(min(14.0, 4.0 * Double(k) / Double(d * d)) * Double(still))
+        let flux = Float(min(16.0, 5.0 * Double(k) / Double(d * d)) * Double(still) * dripGate)
         let g0x = max(0, Int((c.x - bound) / cellPx))
         let g1x = min(grid - 1, Int((c.x + bound) / cellPx))
         let g0y = max(0, Int((c.y - bound) / cellPx))
@@ -167,13 +171,13 @@ final class SprayEngine {
                             if dd < nearD { nearD = dd; near = qi }
                         }
                     }
-                    let bonus = 1 + 0.4 * CGFloat(min(6, Int(dripCount[idx])))
-                    let vol = min(3.2, (0.3 + CGFloat(Double(nv) - 1) * 1.6 + rnd() * 0.6) * bonus)
+                    let bonus = 1 + 0.3 * CGFloat(min(6, Int(dripCount[idx])))
+                    let vol = min(2.4, (0.3 + CGFloat(Double(nv) - 1) * 1.6 + rnd() * 0.6) * bonus)
                     if nearCount > 0 {
                         if rnd() < 0.10, let ni = near {
-                            let extra = vol * (0.010 + rnd() * 0.020) * ppm
-                            drips[ni].budget = min(0.5 * ppm, drips[ni].budget + extra)
-                            drips[ni].vol = min(3.6, drips[ni].vol + 0.12)
+                            let extra = vol * (0.005 + rnd() * 0.012) * ppm
+                            drips[ni].budget = min(0.30 * ppm, drips[ni].budget + extra)
+                            drips[ni].vol = min(3.0, drips[ni].vol + 0.10)
                         } else if nearCount < localMax, rnd() < 0.05, drips.count < 60 {
                             spawnDrip(x: cx, y: cy, vol: vol, color: color)
                         }
@@ -191,7 +195,7 @@ final class SprayEngine {
             origin: CGPoint(x: x, y: y),
             pos: CGPoint(x: x + gaussRnd() * 0.003 * ppm, y: y),
             vol: vol,
-            budget: vol * (0.020 + rnd() * 0.045) * ppm,
+            budget: vol * (0.012 + rnd() * 0.030) * ppm,
             width: max(2.0, (0.0012 + vol * 0.0011) * (0.75 + rnd() * 0.5) * ppm),
             wobble: 0.03 + rnd() * 0.15,
             seed: rnd() * 100,

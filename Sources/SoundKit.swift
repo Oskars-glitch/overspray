@@ -79,9 +79,17 @@ final class SoundKit {
         }
     }
 
+    private var lastShakeIndex = -1
+
     private func playShake(volume: Float) {
-        guard let url = shakeURLs.randomElement() else { return }
-        guard let p = try? AVAudioPlayer(contentsOf: url) else { return }
+        guard !shakeURLs.isEmpty else { return }
+        // always switch to a DIFFERENT variant, even mid continuous shaking
+        var idx = Int.random(in: 0..<shakeURLs.count)
+        if shakeURLs.count > 1, idx == lastShakeIndex {
+            idx = (idx + 1 + Int.random(in: 0..<(shakeURLs.count - 1))) % shakeURLs.count
+        }
+        lastShakeIndex = idx
+        guard let p = try? AVAudioPlayer(contentsOf: shakeURLs[idx]) else { return }
         p.volume = volume
         p.play()
         currentShake = p
