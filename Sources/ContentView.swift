@@ -15,13 +15,12 @@ struct ContentView: View {
                     .frame(width: 54, height: 54)
                 Circle()
                     .fill(state.spraying
-                          ? Color(PaintState.colors[state.colorIndex].ui)
+                          ? Color(state.colors[state.colorIndex])
                           : Color.white.opacity(0.9))
                     .frame(width: 6, height: 6)
             }
 
             VStack {
-                // top bar: record + timer + clear
                 HStack {
                     Button(action: { state.toggleRecordRequested = true }) {
                         ZStack {
@@ -58,7 +57,6 @@ struct ContentView: View {
                 }
                 .padding(.horizontal, 14)
 
-                // status chip
                 Text(state.status)
                     .font(.footnote.weight(.medium))
                     .padding(.horizontal, 14).padding(.vertical, 8)
@@ -68,14 +66,23 @@ struct ContentView: View {
                 Spacer()
 
                 HStack(alignment: .bottom) {
-                    // colors + nozzle caps
                     VStack(spacing: 10) {
+                        // caps: pink dot · cyclops (ring) · beef · chisel (bar)
                         ForEach(PaintState.nozzles.indices.reversed(), id: \.self) { i in
-                            let nz = PaintState.nozzles[i]
-                            Button(action: { state.nozzleIndex = i; state.showToast(nz.name) }) {
+                            let cap = PaintState.nozzles[i]
+                            Button(action: { state.nozzleIndex = i; state.showToast(cap.name) }) {
                                 ZStack {
                                     Circle().fill(.ultraThinMaterial).frame(width: 38, height: 38)
-                                    Circle().fill(Color.white).frame(width: nz.dot, height: nz.dot)
+                                    if cap.chisel {
+                                        RoundedRectangle(cornerRadius: 2)
+                                            .fill(Color.white).frame(width: 18, height: 5)
+                                    } else if cap.holeFrac > 0 {
+                                        Circle().strokeBorder(Color.white, lineWidth: 3)
+                                            .frame(width: cap.icon + 6, height: cap.icon + 6)
+                                    } else {
+                                        Circle().fill(Color.white)
+                                            .frame(width: cap.icon, height: cap.icon)
+                                    }
                                 }
                                 .overlay(Circle().strokeBorder(
                                     state.nozzleIndex == i ? Color.orange : Color.white.opacity(0.2),
@@ -83,23 +90,14 @@ struct ContentView: View {
                             }
                         }
                         Rectangle().fill(Color.white.opacity(0.3)).frame(width: 26, height: 1)
-                        ForEach(PaintState.colors.indices.reversed(), id: \.self) { i in
-                            let cc = PaintState.colors[i]
-                            Button(action: { state.colorIndex = i }) {
-                                Circle()
-                                    .fill(Color(cc.ui))
-                                    .frame(width: 38, height: 38)
-                                    .overlay(Circle().strokeBorder(
-                                        state.colorIndex == i ? Color.white : Color.white.opacity(0.4),
-                                        lineWidth: 2))
-                                    .scaleEffect(state.colorIndex == i ? 1.18 : 1)
-                            }
+                        // colors: tap = select · HOLD + drag = pick from the camera
+                        ForEach(state.colors.indices.reversed(), id: \.self) { i in
+                            ColorSwatch(state: state, index: i)
                         }
                     }
                     Spacer()
-                    // on-screen spray cap (volume-down also sprays)
                     VStack(spacing: 6) {
-                        SprayCap(state: state)
+                        SprayCapButton(state: state)
                         Text("HOLD · or volume-down")
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundColor(.white.opacity(0.7))
@@ -109,6 +107,16 @@ struct ContentView: View {
                 .padding(.bottom, 8)
             }
             .padding(.top, 8)
+
+            // eyedropper: floating preview follows the finger
+            if state.pickingColorIndex != nil, state.pickPoint != .zero {
+                ZStack {
+                    Circle().fill(Color(state.pickPreview)).frame(width: 46, height: 46)
+                    Circle().strokeBorder(Color.white, lineWidth: 3).frame(width: 46, height: 46)
+                }
+                .position(x: state.pickPoint.x, y: state.pickPoint.y - 60)
+                .allowsHitTesting(false)
+            }
 
             if let t = state.toast {
                 VStack {
@@ -125,15 +133,56 @@ struct ContentView: View {
     }
 }
 
+/// A color swatch: tap selects; long-press then drag picks the colour of the
+/// camera image under your finger (session-only — restart resets).
+struct ColorSwatch: View {
+    @ObservedObject var state: PaintState
+    let index: Int
+
+    var body: some View {
+        let picking = state.pickingColorIndex == index
+        Circle()
+            .fill(Color(picking ? state.pickPreview : state.colors[index]))
+            .frame(width: 38, height: 38)
+            .overlay(Circle().strokeBorder(
+                state.colorIndex == index ? Color.white : Color.white.opacity(0.4),
+                lineWidth: 2))
+            .scaleEffect(state.colorIndex == index ? 1.18 : 1)
+            .onTapGesture { state.colorIndex = index }
+            .gesture(
+                LongPressGesture(minimumDuration: 0.35)
+                    .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .global))
+                    .onChanged { value in
+                        if case .second(true, let drag) = value {
+                            if state.pickingColorIndex == nil {
+                                state.pickingColorIndex = index
+                                state.pickPoint = .zero
+                            }
+                            if let d = drag { state.pickPoint = d.location }
+                        }
+                    }
+                    .onEnded { value in
+                        if case .second = value, state.pickingColorIndex == index,
+                           state.pickPoint != .zero {
+                            state.colors[index] = state.pickPreview
+                            state.colorIndex = index
+                        }
+                        state.pickingColorIndex = nil
+                        state.pickPoint = .zero
+                    }
+            )
+    }
+}
+
 /// The physical-feeling spray cap: press and hold to spray.
-struct SprayCap: View {
+struct SprayCapButton: View {
     @ObservedObject var state: PaintState
     @GestureState private var pressed = false
 
     var body: some View {
         ZStack {
             Circle()
-                .fill(Color(PaintState.colors[state.colorIndex].ui))
+                .fill(Color(state.colors[state.colorIndex]))
                 .frame(width: 92, height: 92)
                 .overlay(Circle().strokeBorder(Color.white.opacity(0.85), lineWidth: 3))
                 .shadow(radius: 8)

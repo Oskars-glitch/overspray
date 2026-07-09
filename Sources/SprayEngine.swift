@@ -65,11 +65,11 @@ final class SprayEngine {
     // MARK: spraying
 
     func sprayStroke(from: CGPoint, to: CGPoint, distance: Double,
-                     coneDeg: Double, color: CGColor, dt: Double,
-                     stretch: CGFloat, stretchDir: CGVector) {
+                     cap: SprayCap, color: CGColor, dt: Double,
+                     stretch: CGFloat, stretchDir: CGVector, rollDir: CGVector) {
         let d = max(0.10, distance)
-        let k = CGFloat(pow(4.5 / coneDeg, 0.5))
-        let radius = max(8.0, tan(coneDeg * .pi / 180) * d * Double(ppm))
+        let k = CGFloat(pow(4.5 / cap.deg, 0.5))
+        let radius = max(8.0, tan(cap.deg * .pi / 180) * d * Double(ppm))
         let pathLen = hypot(to.x - from.x, to.y - from.y)
         let speedM = Double(pathLen / ppm) / max(dt, 0.001)
         let still = pow(max(0.0, 1.0 - speedM / 0.30), 1.5)
@@ -80,65 +80,82 @@ final class SprayEngine {
                             y: from.y + (to.y - from.y) * f)
             stamp(at: p, d: CGFloat(d), k: k, R: CGFloat(radius), color: color,
                   dtShare: dt / Double(stamps), still: CGFloat(still),
-                  stretch: stretch, sd: stretchDir,
-                  budgetShare: max(1, stamps), coneDeg: coneDeg)
+                  stretch: stretch, sd: stretchDir, roll: rollDir,
+                  budgetShare: max(1, stamps), cap: cap)
         }
     }
 
     private func stamp(at c: CGPoint, d: CGFloat, k: CGFloat, R: CGFloat,
                        color: CGColor, dtShare: Double, still: CGFloat,
-                       stretch: CGFloat, sd: CGVector, budgetShare: Int, coneDeg: Double) {
+                       stretch: CGFloat, sd: CGVector, roll: CGVector,
+                       budgetShare: Int, cap: SprayCap) {
         @inline(__always) func place(_ ox: CGFloat, _ oy: CGFloat) -> CGPoint {
             CGPoint(x: c.x + sd.dx * ox * stretch - sd.dy * oy,
                     y: c.y + sd.dy * ox * stretch + sd.dx * oy)
         }
+        // an offset in plain texture space, run through the oblique stretch
+        @inline(__always) func placeWorld(_ offx: CGFloat, _ offy: CGFloat) -> CGPoint {
+            place(offx * sd.dx + offy * sd.dy, -offx * sd.dy + offy * sd.dx)
+        }
 
         // OPAQUE dot field: density carries the look, never transparency.
-        // Close: few but PRECISE tight dots (crisp round cluster, no strays).
-        // Far: finer dots scattered wide, plus stray splatter.
         let close = min(1, max(0, (0.85 - d) / 0.85))
-        let sigma = R * (0.30 + 0.50 * (1 - close))
-        var count = Int((60 + 240 * close) * k * 5)      // 5× paint flow
-        count = min(count, max(80, 4500 / budgetShare))  // frame budget on fast sweeps
+        let sigma = R * (0.30 + 0.50 * (1 - close)) * cap.scatterScale
+        var count = Int((60 + 240 * close) * k * 5 * cap.countScale)
+        count = min(count, max(80, 5500 / budgetShare))  // frame budget on fast sweeps
         let mm = ppm / 1000
 
         for _ in 0..<count {
-            let p = place(gaussRnd() * sigma, gaussRnd() * sigma)
-            let r = (0.10 + rnd() * rnd() * 0.45) * (1 + d * 0.5) * mm
+            let p: CGPoint
+            if cap.chisel {
+                // flat line footprint, rotating with the phone (roll axis)
+                let u = gaussRnd() * R
+                let v = gaussRnd() * R * 0.14
+                p = placeWorld(roll.dx * u - roll.dy * v, roll.dy * u + roll.dx * v)
+            } else if cap.holeFrac > 0 {
+                // ring with a clean hole in the middle (cyclops)
+                let rr = R * (cap.holeFrac + (1 - cap.holeFrac) * sqrt(rnd()))
+                let a = rnd() * .pi * 2
+                p = placeWorld(cos(a) * rr + gaussRnd() * R * 0.04,
+                               sin(a) * rr + gaussRnd() * R * 0.04)
+            } else {
+                p = place(gaussRnd() * sigma, gaussRnd() * sigma)
+            }
+            let r = (0.10 + rnd() * rnd() * 0.45) * (1 + d * 0.5) * mm * cap.dotScale
             canvas.fillDot(p.x, p.y, max(0.9, r), color)
         }
-        // stray splatter only appears from a distance — up close the cone is tight
-        if d > 0.35 {
-            let spl = Int((3 * d).rounded())
+        // stray splatter only from a distance, and only from loose caps
+        if d > 0.35, cap.scatterScale > 0.35 {
+            let spl = Int((3 * d * Double(cap.scatterScale)).rounded())
             for _ in 0..<spl {
                 let a = rnd() * .pi * 2, rr = R * (1.15 + rnd() * 1.4)
-                let p = place(cos(a) * rr, sin(a) * rr)
-                canvas.fillDot(p.x, p.y, max(0.9, (0.15 + rnd() * 0.4) * mm * (1 + d * 0.5)), color)
+                let p = placeWorld(cos(a) * rr, sin(a) * rr)
+                canvas.fillDot(p.x, p.y,
+                               max(0.9, (0.15 + rnd() * 0.4) * mm * (1 + d * 0.5) * cap.dotScale), color)
             }
         }
-        // occasional fat spit (also not at point-blank range)
-        if d > 0.3, rnd() < 0.06 {
+        // occasional fat spit
+        if !cap.chisel, d > 0.3, rnd() < 0.06 * Double(cap.scatterScale) {
             let p = place(gaussRnd() * R * 0.8, gaussRnd() * R * 0.8)
             canvas.fillDot(p.x, p.y, (0.5 + rnd() * 0.9) * mm * 2, color)
         }
 
         accumulate(at: c, d: d, k: k, R: R, color: color,
-                   dtShare: dtShare, still: still, stretch: stretch, sd: sd, coneDeg: coneDeg)
+                   dtShare: dtShare, still: still, stretch: stretch, sd: sd, cap: cap)
     }
 
     // MARK: accumulation → drips
 
     private func accumulate(at c: CGPoint, d: CGFloat, k: CGFloat, R: CGFloat,
                             color: CGColor, dtShare: Double, still: CGFloat,
-                            stretch: CGFloat, sd: CGVector, coneDeg: Double) {
+                            stretch: CGFloat, sd: CGVector, cap: SprayCap) {
         guard still > 0.01 else { return }
-        // drips only from the SKINNY cap (tight caps concentrate paint into runs;
-        // wider caps disperse it and never drip) and only up close
-        guard coneDeg <= 3.0 else { return }
-        // full inside ~0.22 m, gone by ~0.6 m — even closer-ranged than before
-        let dripGate = pow(min(1.0, max(0.0, (0.6 - Double(d)) / 0.38)), 1.8)
+        // per-cap drip rules: each cap has its own maximum drip distance
+        // (0 = that cap never drips, e.g. cyclops)
+        guard cap.dripMaxM > 0 else { return }
+        let dripGate = pow(min(1.0, max(0.0, (cap.dripMaxM - Double(d)) / cap.dripMaxM)), 1.8)
         guard dripGate > 0.02 else { return }
-        let wet = R * 0.62
+        let wet = cap.chisel ? R * 0.30 : R * 0.62
         let wetEff = max(wet, cellPx * 0.75)
         let bound = wetEff * max(1, stretch)
         let localR = max(0.10 * ppm, wet * 2.3)
@@ -199,7 +216,7 @@ final class SprayEngine {
             vol: vol,
             budget: vol * (0.008 + rnd() * 0.020) * ppm,
             width: max(2.0, (0.0012 + vol * 0.0011) * (0.75 + rnd() * 0.5) * ppm),
-            wobble: 0.03 + rnd() * 0.15,
+            wobble: 0.008 + rnd() * 0.045,
             seed: rnd() * 100,
             endBlob: rnd() < 0.7,
             color: color))

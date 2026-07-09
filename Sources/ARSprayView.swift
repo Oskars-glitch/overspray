@@ -43,6 +43,9 @@ struct ARSprayView: UIViewRepresentable {
         private var ambientLight: SCNLight?
         private var torchApplied = false
         private var wasSpraying = false
+        private var lastPatchSpawn: TimeInterval = 0
+        private var patchToastShown = false
+        private let viewSize = UIScreen.main.bounds.size
         private var viewCenter = CGPoint(x: UIScreen.main.bounds.midX,
                                          y: UIScreen.main.bounds.midY)
 
@@ -76,9 +79,16 @@ struct ARSprayView: UIViewRepresentable {
         // MARK: plane lifecycle
 
         func renderer(_ renderer: SCNSceneRenderer, didAdd node: SCNNode, for anchor: ARAnchor) {
-            guard let plane = anchor as? ARPlaneAnchor, plane.alignment == .vertical else { return }
-            let surface = PaintSurface(anchor: plane)
-            surfaces[plane.identifier] = surface
+            var surface: PaintSurface?
+            if let plane = anchor as? ARPlaneAnchor, plane.alignment == .vertical {
+                surface = PaintSurface(id: plane.identifier, transform: plane.transform)
+            } else if anchor.name == "patch" {
+                // freestyle patch: planted where you sprayed on an ESTIMATED
+                // surface (uneven facades ARKit couldn't turn into a plane)
+                surface = PaintSurface(id: anchor.identifier, transform: anchor.transform)
+            }
+            guard let surface = surface else { return }
+            surfaces[surface.id] = surface
             node.addChildNode(surface.node)
             DispatchQueue.main.async {
                 self.state.wallCount = self.surfaces.count
@@ -135,22 +145,31 @@ struct ARSprayView: UIViewRepresentable {
                 }
             }
 
-            let camPos = frame.camera.transform.position
+            let camTransform = frame.camera.transform
+            let camPos = camTransform.position
+            let camFwd = -simd_normalize(simd_float3(camTransform.columns.2.x,
+                                                     camTransform.columns.2.y,
+                                                     camTransform.columns.2.z))
+            let camRight = simd_normalize(simd_float3(camTransform.columns.0.x,
+                                                      camTransform.columns.0.y,
+                                                      camTransform.columns.0.z))
 
             var hit: (surface: PaintSurface, tex: CGPoint, dist: Double,
-                      stretch: CGFloat, sdir: CGVector)?
-            if let query = view.raycastQuery(from: viewCenter,
-                                             allowing: .existingPlaneGeometry,
-                                             alignment: .vertical),
-               let result = view.session.raycast(query).first,
-               let anchor = result.anchor as? ARPlaneAnchor,
-               let surface = surfaces[anchor.identifier] {
-                let world = result.worldTransform.position
-                let delta = world - camPos
-                let dist = Double(simd_length(delta))
-                if dist > 0.02, let tex = surface.texturePoint(worldPoint: world) {
-                    let (stretch, sdir) = surface.obliqueness(rayDir: delta / Float(dist))
-                    hit = (surface, tex, dist, stretch, sdir)
+                      stretch: CGFloat, sdir: CGVector, roll: CGVector)?
+            // 1 · every known surface (detected walls AND freestyle patches)
+            var bestT = Float.greatestFiniteMagnitude
+            var bestSurface: PaintSurface?
+            for s in surfaces.values {
+                if let t = s.rayHit(origin: camPos, dir: camFwd), t < bestT {
+                    bestT = t; bestSurface = s
+                }
+            }
+            if let surface = bestSurface, bestT < 8 {
+                let world = camPos + camFwd * bestT
+                if let tex = surface.texturePoint(worldPoint: world) {
+                    let (stretch, sdir) = surface.obliqueness(rayDir: camFwd)
+                    hit = (surface, tex, Double(bestT), stretch, sdir,
+                           surface.rollDirection(cameraRight: camRight))
                 }
             }
 
@@ -167,18 +186,45 @@ struct ARSprayView: UIViewRepresentable {
 
             if spraying, let h = hit {
                 if let engine = ensureEngine(h.surface) {
-                    let color = PaintState.colors[state.colorIndex].ui.cgColor
-                    let nozzle = PaintState.nozzles[state.nozzleIndex]
+                    let color = state.colors[state.colorIndex].cgColor
+                    let cap = PaintState.nozzles[state.nozzleIndex]
                     var from = h.tex
                     if let prev = sprayPrev, prev.0 == h.surface.id { from = prev.1 }
                     engine.sprayStroke(from: from, to: h.tex,
-                                       distance: h.dist, coneDeg: nozzle.deg,
+                                       distance: h.dist, cap: cap,
                                        color: color, dt: dt,
-                                       stretch: h.stretch, stretchDir: h.sdir)
+                                       stretch: h.stretch, stretchDir: h.sdir,
+                                       rollDir: h.roll)
                     sprayPrev = (h.surface.id, h.tex)
                 }
             } else {
                 sprayPrev = nil
+                // spraying at an UNRECOGNISED spot: plant a freestyle patch on
+                // ARKit's estimated surface so uneven facades stay paintable
+                if spraying, lastTime - lastPatchSpawn > 0.4,
+                   let query = view.raycastQuery(from: viewCenter,
+                                                 allowing: .estimatedPlane,
+                                                 alignment: .any),
+                   let est = view.session.raycast(query).first {
+                    let d = simd_length(est.worldTransform.position - camPos)
+                    if d > 0.12, d < 4 {
+                        lastPatchSpawn = lastTime
+                        view.session.add(anchor: ARAnchor(name: "patch",
+                                                          transform: est.worldTransform))
+                        if !patchToastShown {
+                            patchToastShown = true
+                            state.showToast("Freestyle surface — painting on estimated geometry")
+                        }
+                    }
+                }
+            }
+
+            // live color picking: long-press a swatch, drag over the camera view
+            if state.pickingColorIndex != nil {
+                let ui = sampleCameraColor(frame: frame, at: state.pickPoint)
+                if let ui = ui {
+                    DispatchQueue.main.async { self.state.pickPreview = ui }
+                }
             }
 
             for s in surfaces.values {
@@ -250,6 +296,33 @@ struct ARSprayView: UIViewRepresentable {
             state.showToast("Rescanning…")
         }
 
+        // MARK: camera color sampling (for the long-press eyedropper)
+
+        private func sampleCameraColor(frame: ARFrame, at pt: CGPoint) -> UIColor? {
+            let buf = frame.capturedImage
+            guard CVPixelBufferGetPlaneCount(buf) >= 2 else { return nil }
+            let inv = frame.displayTransform(for: .portrait, viewportSize: viewSize).inverted()
+            var norm = CGPoint(x: pt.x / viewSize.width, y: pt.y / viewSize.height).applying(inv)
+            norm.x = min(1, max(0, norm.x)); norm.y = min(1, max(0, norm.y))
+            CVPixelBufferLockBaseAddress(buf, .readOnly)
+            defer { CVPixelBufferUnlockBaseAddress(buf, .readOnly) }
+            let w = CVPixelBufferGetWidthOfPlane(buf, 0), h = CVPixelBufferGetHeightOfPlane(buf, 0)
+            let px = min(w - 1, Int(norm.x * CGFloat(w))), py = min(h - 1, Int(norm.y * CGFloat(h)))
+            guard let base0 = CVPixelBufferGetBaseAddressOfPlane(buf, 0),
+                  let base1 = CVPixelBufferGetBaseAddressOfPlane(buf, 1) else { return nil }
+            let rb0 = CVPixelBufferGetBytesPerRowOfPlane(buf, 0)
+            let rb1 = CVPixelBufferGetBytesPerRowOfPlane(buf, 1)
+            let yv = Double(base0.assumingMemoryBound(to: UInt8.self)[py * rb0 + px])
+            let cIdx = (py / 2) * rb1 + (px / 2) * 2
+            let cb = Double(base1.assumingMemoryBound(to: UInt8.self)[cIdx])
+            let cr = Double(base1.assumingMemoryBound(to: UInt8.self)[cIdx + 1])
+            let yy = (yv - 16) * 1.164
+            let r = max(0, min(255, yy + 1.793 * (cr - 128)))
+            let g = max(0, min(255, yy - 0.213 * (cb - 128) - 0.533 * (cr - 128)))
+            let b = max(0, min(255, yy + 2.112 * (cb - 128)))
+            return UIColor(red: r / 255, green: g / 255, blue: b / 255, alpha: 1)
+        }
+
         // MARK: recording (mic runs on its own session — AR camera untouched)
 
         private func toggleRecording() {
@@ -284,14 +357,43 @@ final class PaintSurface {
     private var anchorTransform: simd_float4x4
     private let dripDirLocal: CGVector
 
-    init(anchor: ARPlaneAnchor) {
-        id = anchor.identifier
-        anchorTransform = anchor.transform
+    init(id: UUID, transform: simd_float4x4) {
+        self.id = id
+        anchorTransform = transform
         node = SCNNode()
         node.eulerAngles.x = -.pi / 2
 
-        let downLocal = anchor.transform.inverse * simd_float4(0, -1, 0, 0)
+        let downLocal = transform.inverse * simd_float4(0, -1, 0, 0)
         dripDirLocal = CGVector(dx: CGFloat(downLocal.x), dy: CGFloat(downLocal.z))
+    }
+
+    /// Intersect a world-space ray with this surface's plane (nil if it misses
+    /// the plane or lands outside the 3 m canvas).
+    func rayHit(origin: simd_float3, dir: simd_float3) -> Float? {
+        let col = anchorTransform.columns.1
+        let n = simd_normalize(simd_float3(col.x, col.y, col.z))
+        let denom = simd_dot(dir, n)
+        guard abs(denom) > 1e-4 else { return nil }
+        let p0 = anchorTransform.position
+        let t = simd_dot(p0 - origin, n) / denom
+        guard t > 0.02 else { return nil }
+        guard texturePoint(worldPoint: origin + dir * t) != nil else { return nil }
+        return t
+    }
+
+    /// The camera's right-axis projected onto the wall — the CHISEL cap's
+    /// line direction, so rotating the phone visibly rotates the stroke.
+    func rollDirection(cameraRight: simd_float3) -> CGVector {
+        let col = anchorTransform.columns.1
+        let n = simd_normalize(simd_float3(col.x, col.y, col.z))
+        var t = cameraRight - n * simd_dot(cameraRight, n)
+        let len = simd_length(t)
+        guard len > 1e-4 else { return CGVector(dx: 1, dy: 0) }
+        t /= len
+        let local = anchorTransform.inverse * vec4(t, 0)
+        let l = hypot(CGFloat(local.x), CGFloat(local.z))
+        guard l > 1e-4 else { return CGVector(dx: 1, dy: 0) }
+        return CGVector(dx: CGFloat(local.x) / l, dy: CGFloat(local.z) / l)
     }
 
     func updateTransform(_ t: simd_float4x4) { anchorTransform = t }
