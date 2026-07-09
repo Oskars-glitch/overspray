@@ -1,0 +1,27 @@
+name: Overspray
+options:
+  bundleIdPrefix: com.yourname
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  Overspray:
+    type: application
+    platform: iOS
+    sources: [Sources]
+    settings:
+      base:
+        TARGETED_DEVICE_FAMILY: "1"
+        INFOPLIST_KEY_CFBundleDisplayName: Overspray
+        SWIFT_VERSION: "5.9"
+        CODE_SIGN_STYLE: Automatic
+    info:
+      path: Sources/Info.plist
+      properties:
+        UILaunchScreen: {}
+        CFBundleDisplayName: Overspray
+        NSCameraUsageDescription: "The camera shows the wall you are spray painting in AR."
+        NSPhotoLibraryAddUsageDescription: "Saves your recorded spray-painting videos to Photos."
+        NSMicrophoneUsageDescription: "Not used, required placeholder."
+        UIRequiredDeviceCapabilities: [arkit]
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIViewControllerBasedStatusBarAppearance: false
