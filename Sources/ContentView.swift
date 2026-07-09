@@ -40,7 +40,18 @@ struct ContentView: View {
                             .foregroundColor(.red)
                     }
                     Spacer()
-                    Button("Clear wall") { state.clearRequested = true }
+                    Button(action: { state.torchOn.toggle() }) {
+                        Image(systemName: state.torchOn ? "flashlight.on.fill" : "flashlight.off.fill")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundColor(state.torchOn ? .yellow : .white)
+                            .frame(width: 38, height: 38)
+                            .background(.ultraThinMaterial, in: Circle())
+                    }
+                    Button("Rescan") { state.rescanRequested = true }
+                        .font(.footnote.weight(.medium))
+                        .padding(.horizontal, 14).padding(.vertical, 9)
+                        .background(.ultraThinMaterial, in: Capsule())
+                    Button("Clear") { state.clearRequested = true }
                         .font(.footnote.weight(.medium))
                         .padding(.horizontal, 14).padding(.vertical, 9)
                         .background(.ultraThinMaterial, in: Capsule())

@@ -25,10 +25,12 @@ final class PaintState: ObservableObject {
     @Published var wallCount = 0
     @Published var aimedAtWall = false
     @Published var toast: String? = nil
+    @Published var torchOn = false
 
     // commands consumed by the AR coordinator
     var clearRequested = false
     var toggleRecordRequested = false
+    var rescanRequested = false
 
     static let colors: [(name: String, ui: UIColor)] = [
         ("Black", UIColor(red: 0.07, green: 0.07, blue: 0.08, alpha: 1)),
