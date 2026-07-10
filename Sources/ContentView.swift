@@ -60,21 +60,21 @@ struct ContentView: View {
                     }
                     Button(action: { state.torchOn.toggle() }) {
                         Image(systemName: state.torchOn ? "flashlight.on.fill" : "flashlight.off.fill")
-                            .font(.system(size: 16, weight: .semibold))
+                            .font(.system(size: 15, weight: .semibold))
                             .foregroundColor(state.torchOn ? .yellow : .white)
                             .frame(width: 38, height: 38)
                             .background(.ultraThinMaterial, in: Circle())
                     }
                     Button("Rescan") { state.rescanRequested = true }
                         .font(.footnote.weight(.medium))
-                        .padding(.horizontal, 14).padding(.vertical, 9)
+                        .padding(.horizontal, 12).padding(.vertical, 9)
                         .background(.ultraThinMaterial, in: Capsule())
                     Button("Clear") { state.clearRequested = true }
                         .font(.footnote.weight(.medium))
-                        .padding(.horizontal, 14).padding(.vertical, 9)
+                        .padding(.horizontal, 12).padding(.vertical, 9)
                         .background(.ultraThinMaterial, in: Capsule())
                 }
-                .padding(.horizontal, 14)
+                .padding(.horizontal, 12)
 
                 Text(state.status)
                     .font(.footnote.weight(.medium))
@@ -85,49 +85,46 @@ struct ContentView: View {
                 Spacer()
 
                 HStack(alignment: .bottom) {
-                    VStack(spacing: 10) {
-                        // caps: pink dot · cyclops (ring) · beef · chisel (bar)
+                    VStack(spacing: 8) {
                         ForEach(PaintState.nozzles.indices.reversed(), id: \.self) { i in
-                            let cap = PaintState.nozzles[i]
-                            Button(action: { state.nozzleIndex = i; state.showToast(cap.name) }) {
-                                ZStack {
-                                    Circle().fill(.ultraThinMaterial).frame(width: 38, height: 38)
-                                    if cap.chisel {
-                                        RoundedRectangle(cornerRadius: 2)
-                                            .fill(Color.white).frame(width: 18, height: 5)
-                                    } else if cap.holeFrac > 0 {
-                                        Circle().strokeBorder(Color.white, lineWidth: 3)
-                                            .frame(width: cap.icon + 6, height: cap.icon + 6)
-                                    } else {
-                                        Circle().fill(Color.white)
-                                            .frame(width: cap.icon, height: cap.icon)
-                                    }
-                                }
-                                .overlay(Circle().strokeBorder(
-                                    state.nozzleIndex == i ? Color.orange : Color.white.opacity(0.2),
-                                    lineWidth: 2))
-                            }
+                            CapButton(state: state, index: i)
                         }
-                        Rectangle().fill(Color.white.opacity(0.3)).frame(width: 26, height: 1)
-                        // colors: tap = select · HOLD + drag = pick from the camera
+                        Rectangle().fill(Color.white.opacity(0.3)).frame(width: 24, height: 1)
                         ForEach(state.colors.indices.reversed(), id: \.self) { i in
                             ColorSwatch(state: state, index: i)
                         }
                     }
                     Spacer()
-                    VStack(spacing: 6) {
+                    VStack(spacing: 8) {
+                        HStack(spacing: 8) {
+                            // pressure boost ×1 / ×5 / ×10
+                            Button(action: { state.pressureBoost = (state.pressureBoost + 1) % 3 }) {
+                                Text("x\([1, 5, 10][state.pressureBoost])")
+                                    .font(.system(size: 13, weight: .bold, design: .monospaced))
+                                    .foregroundColor(state.pressureBoost > 0 ? .orange : .white)
+                                    .padding(.horizontal, 12).padding(.vertical, 8)
+                                    .background(.ultraThinMaterial, in: Capsule())
+                            }
+                            // dotted-line attachment .0 / .1 / .2
+                            Button(action: { state.dashMode = (state.dashMode + 1) % 3 }) {
+                                Text(".\(state.dashMode)")
+                                    .font(.system(size: 13, weight: .bold, design: .monospaced))
+                                    .foregroundColor(state.dashMode > 0 ? .orange : .white)
+                                    .padding(.horizontal, 12).padding(.vertical, 8)
+                                    .background(.ultraThinMaterial, in: Capsule())
+                            }
+                        }
                         SprayCapButton(state: state)
                         Text("HOLD · or volume-down")
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundColor(.white.opacity(0.7))
                     }
                 }
-                .padding(.horizontal, 18)
+                .padding(.horizontal, 16)
                 .padding(.bottom, 8)
             }
             .padding(.top, 8)
 
-            // eyedropper: floating preview follows the finger
             if state.pickingColorIndex != nil, state.pickPoint != .zero {
                 ZStack {
                     Circle().fill(Color(state.pickPreview)).frame(width: 46, height: 46)
@@ -135,6 +132,10 @@ struct ContentView: View {
                 }
                 .position(x: state.pickPoint.x, y: state.pickPoint.y - 60)
                 .allowsHitTesting(false)
+            }
+
+            if state.drawingShape {
+                ShapeDrawOverlay(state: state)
             }
 
             if let t = state.toast {
@@ -149,6 +150,137 @@ struct ContentView: View {
                 .transition(.opacity)
             }
         }
+    }
+}
+
+/// One cap button, with the right icon per cap type.
+struct CapButton: View {
+    @ObservedObject var state: PaintState
+    let index: Int
+
+    var body: some View {
+        let cap = PaintState.nozzles[index]
+        Button(action: {
+            if cap.custom, state.nozzleIndex == index || state.customShape.count < 2 {
+                state.drawingShape = true
+            }
+            state.nozzleIndex = index
+            state.showToast(cap.name)
+        }) {
+            ZStack {
+                Circle().fill(.ultraThinMaterial).frame(width: 34, height: 34)
+                if cap.custom {
+                    Image(systemName: "scribble")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.white)
+                } else if cap.dirty {
+                    // splatter icon
+                    Circle().fill(Color.white).frame(width: 9, height: 9)
+                    Circle().fill(Color.white).frame(width: 4, height: 4).offset(x: 9, y: -6)
+                    Circle().fill(Color.white).frame(width: 3, height: 3).offset(x: -9, y: 7)
+                    Circle().fill(Color.white).frame(width: 3, height: 3).offset(x: 6, y: 9)
+                    Circle().fill(Color.white).frame(width: 2.5, height: 2.5).offset(x: -8, y: -8)
+                } else if cap.chisel {
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color.white).frame(width: 16, height: 5)
+                } else if cap.holeFrac > 0 {
+                    Circle().strokeBorder(Color.white, lineWidth: 3)
+                        .frame(width: cap.icon + 6, height: cap.icon + 6)
+                } else {
+                    Circle().fill(Color.white)
+                        .frame(width: cap.icon, height: cap.icon)
+                }
+            }
+            .overlay(Circle().strokeBorder(
+                state.nozzleIndex == index ? Color.orange : Color.white.opacity(0.2),
+                lineWidth: 2))
+        }
+    }
+}
+
+/// Draw-your-own-cap panel: sketch a shape with one or more strokes; the
+/// droplets will follow it, camera-facing like the chisel.
+struct ShapeDrawOverlay: View {
+    @ObservedObject var state: PaintState
+    @State private var strokes: [[CGPoint]] = []
+    @State private var current: [CGPoint] = []
+    private let panel: CGFloat = 300
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.65).ignoresSafeArea()
+            VStack(spacing: 16) {
+                Text("Draw your cap's spray shape")
+                    .font(.headline).foregroundColor(.white)
+                ZStack {
+                    RoundedRectangle(cornerRadius: 16).fill(Color(white: 0.12))
+                    RoundedRectangle(cornerRadius: 16)
+                        .strokeBorder(Color.white.opacity(0.3), lineWidth: 1)
+                    Image(systemName: "plus")
+                        .font(.system(size: 12)).foregroundColor(.white.opacity(0.25))
+                    Path { p in
+                        for s in strokes + (current.isEmpty ? [] : [current]) {
+                            guard let f = s.first else { continue }
+                            p.move(to: f)
+                            for pt in s.dropFirst() { p.addLine(to: pt) }
+                        }
+                    }
+                    .stroke(Color.white, style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round))
+                }
+                .frame(width: panel, height: panel)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0, coordinateSpace: .local)
+                        .onChanged { v in
+                            let p = CGPoint(x: min(max(v.location.x, 4), panel - 4),
+                                            y: min(max(v.location.y, 4), panel - 4))
+                            current.append(p)
+                        }
+                        .onEnded { _ in
+                            if current.count > 1 { strokes.append(current) }
+                            current = []
+                        }
+                )
+                HStack(spacing: 12) {
+                    Button("Clear") { strokes = []; current = [] }
+                        .font(.callout.weight(.semibold))
+                        .padding(.horizontal, 18).padding(.vertical, 10)
+                        .background(.ultraThinMaterial, in: Capsule())
+                    Button("Cancel") { state.drawingShape = false }
+                        .font(.callout.weight(.semibold))
+                        .padding(.horizontal, 18).padding(.vertical, 10)
+                        .background(.ultraThinMaterial, in: Capsule())
+                    Button("Done") { commit() }
+                        .font(.callout.weight(.bold))
+                        .foregroundColor(.black)
+                        .padding(.horizontal, 22).padding(.vertical, 10)
+                        .background(Color.white, in: Capsule())
+                }
+            }
+        }
+    }
+
+    private func commit() {
+        let all = strokes.flatMap { $0 }
+        guard all.count >= 2 else { state.drawingShape = false; return }
+        var cx: CGFloat = 0, cy: CGFloat = 0
+        for p in all { cx += p.x; cy += p.y }
+        cx /= CGFloat(all.count); cy /= CGFloat(all.count)
+        var ext: CGFloat = 1
+        for p in all { ext = max(ext, abs(p.x - cx), abs(p.y - cy)) }
+        let stride = max(1, all.count / 90)
+        var norm: [CGPoint] = []
+        var i = 0
+        while i < all.count {
+            norm.append(CGPoint(x: (all[i].x - cx) / ext, y: (all[i].y - cy) / ext))
+            i += stride
+        }
+        state.customShape = norm
+        state.drawingShape = false
+        if let idx = PaintState.nozzles.firstIndex(where: { $0.custom }) {
+            state.nozzleIndex = idx
+        }
+        state.showToast("Custom cap ready")
     }
 }
 
@@ -184,11 +316,11 @@ struct ColorSwatch: View {
         let picking = state.pickingColorIndex == index
         Circle()
             .fill(Color(picking ? state.pickPreview : state.colors[index]))
-            .frame(width: 38, height: 38)
+            .frame(width: 34, height: 34)
             .overlay(Circle().strokeBorder(
                 state.colorIndex == index ? Color.white : Color.white.opacity(0.4),
                 lineWidth: 2))
-            .scaleEffect(state.colorIndex == index ? 1.18 : 1)
+            .scaleEffect(state.colorIndex == index ? 1.15 : 1)
             .onTapGesture { state.colorIndex = index }
             .gesture(
                 LongPressGesture(minimumDuration: 0.35)

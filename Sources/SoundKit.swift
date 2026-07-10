@@ -51,6 +51,12 @@ final class SoundKit {
         }
     }
 
+    /// Dotted-line mode: mute in the gaps without restarting the loop,
+    /// so the sound resumes seamlessly on each sprayed segment.
+    func setSprayMuted(_ muted: Bool) {
+        sprayPlayer?.volume = muted ? 0 : 0.9
+    }
+
     // MARK: shake detection (CoreMotion — works even mid-spray)
     // Two tiers: hard shakes play full volume, gentle rattles play at 50%.
     // While shaking continues, a new random variant chains on immediately —

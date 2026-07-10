@@ -21,6 +21,7 @@ final class PaintCanvas {
     let tilesPerSide: Int
     let sizePx: CGFloat                                             // whole surface, px
     private let device: MTLDevice
+    private let queue: MTLCommandQueue?
     private let budget: TileBudget
     private weak var parent: SCNNode?
     var onBudgetExceeded: (() -> Void)?
@@ -34,6 +35,7 @@ final class PaintCanvas {
         let texture: MTLTexture
         let node: SCNNode
         var dirty: CGRect?
+        var mipsDirty = true          // mip chain needs regenerating after uploads
 
         init?(device: MTLDevice) {
             let size = PaintCanvas.tilePx
@@ -48,8 +50,11 @@ final class PaintCanvas {
             ctx.scaleBy(x: 1, y: -1)
             ctx.setLineCap(.round)
 
+            // mipmapped: at distance the GPU samples pre-filtered smaller
+            // versions → a barely visible softness that removes the moiré
+            // shimmer, while close-up stays perfectly sharp
             let desc = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: .rgba8Unorm, width: size, height: size, mipmapped: false)
+                pixelFormat: .rgba8Unorm, width: size, height: size, mipmapped: true)
             desc.usage = [.shaderRead]
             guard let tex = device.makeTexture(descriptor: desc) else { return nil }
             texture = tex
@@ -63,6 +68,8 @@ final class PaintCanvas {
             let material = SCNMaterial()
             material.lightingModel = .blinn
             material.diffuse.contents = tex
+            material.diffuse.mipFilter = .linear          // trilinear between mips
+            material.diffuse.maxAnisotropy = 4            // stays crisp at oblique views
             material.specular.contents = UIColor(white: 0.23, alpha: 1)
             material.shininess = 24
             material.isDoubleSided = false
@@ -84,6 +91,7 @@ final class PaintCanvas {
     init(surfaceMeters: CGFloat, device: MTLDevice, budget: TileBudget, parent: SCNNode) {
         self.surfaceMeters = surfaceMeters
         self.device = device
+        self.queue = device.makeCommandQueue()
         self.budget = budget
         self.parent = parent
         tilesPerSide = Int((surfaceMeters / PaintCanvas.tileMeters).rounded())
@@ -184,7 +192,24 @@ final class PaintCanvas {
             let src = data.advanced(by: y * t.bpr + x * 4)
             t.texture.replace(region: MTLRegionMake2D(x, y, w, h),
                               mipmapLevel: 0, withBytes: src, bytesPerRow: t.bpr)
+            t.mipsDirty = true
         }
+        regenerateMips()
+    }
+
+    /// Rebuild the mip chains of any freshly painted tiles (one GPU blit pass)
+    /// — this is what gives the distance softness that removes moiré.
+    private func regenerateMips() {
+        let stale = tiles.values.filter { $0.mipsDirty }
+        guard !stale.isEmpty, let queue = queue,
+              let buf = queue.makeCommandBuffer(),
+              let blit = buf.makeBlitCommandEncoder() else { return }
+        for t in stale {
+            blit.generateMipmaps(for: t.texture)
+            t.mipsDirty = false
+        }
+        blit.endEncoding()
+        buf.commit()
     }
 
     /// Full-resolution composite of everything painted, transparent background.
@@ -224,8 +249,10 @@ final class PaintCanvas {
                                   mipmapLevel: 0, withBytes: data, bytesPerRow: t.bpr)
             }
             t.dirty = nil
+            t.mipsDirty = true
         }
         contentRect = nil
+        regenerateMips()
     }
 
     func teardown() {

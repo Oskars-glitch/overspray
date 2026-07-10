@@ -49,6 +49,7 @@ struct ARSprayView: UIViewRepresentable {
         private var editingSurface: PaintSurface?
         private var grabbedVertex: Int?
         private var lastHitSurfaceID: UUID?
+        private var lastAudible = true
         private let viewSize = UIScreen.main.bounds.size
         private var viewCenter = CGPoint(x: UIScreen.main.bounds.midX,
                                          y: UIScreen.main.bounds.midY)
@@ -215,32 +216,51 @@ struct ARSprayView: UIViewRepresentable {
             }
 
             let spraying = (state.spraying || VolumeSpray.shared.holding) && !state.editingPlane
+            let cap = PaintState.nozzles[state.nozzleIndex]
+            let shape = cap.custom ? state.customShape : []
+            let capReady = !(cap.custom && shape.count < 2)
             CanPhysics.shared.tick(spraying: spraying && hit != nil, dt: dt)
             handleEditTouch(renderer: renderer)
             if spraying != wasSpraying {
                 wasSpraying = spraying
+                if spraying {
+                    CanPhysics.shared.dashReset()
+                    if !capReady { state.showToast("Draw your cap first — tap the blank cap again") }
+                }
                 DispatchQueue.main.async { SoundKit.shared.setSpraying(spraying) }
             }
 
-            if spraying, let h = hit, h.surface.contains(h.tex) {
+            if spraying, capReady, let h = hit, h.surface.contains(h.tex) {
                 if let engine = ensureEngine(h.surface) {
                     let color = state.colors[state.colorIndex].cgColor
-                    let cap = PaintState.nozzles[state.nozzleIndex]
+                    let boost: CGFloat = [1, 5, 10][state.pressureBoost]
                     var from = h.tex
                     if let prev = sprayPrev, prev.0 == h.surface.id { from = prev.1 }
                     engine.sprayStroke(from: from, to: h.tex,
                                        distance: h.dist, cap: cap,
                                        color: color, dt: dt,
                                        stretch: h.stretch, stretchDir: h.sdir,
-                                       rollDir: h.roll)
+                                       rollDir: h.roll,
+                                       boost: boost, dashMode: state.dashMode,
+                                       shape: shape)
                     sprayPrev = (h.surface.id, h.tex)
                 }
+                // dotted-line attachment: spray audio only on painted segments
+                let audible = state.dashMode == 0 || CanPhysics.shared.dashOn
+                if audible != lastAudible {
+                    lastAudible = audible
+                    DispatchQueue.main.async { SoundKit.shared.setSprayMuted(!audible) }
+                }
             } else {
+                if !lastAudible {
+                    lastAudible = true
+                    DispatchQueue.main.async { SoundKit.shared.setSprayMuted(false) }
+                }
                 sprayPrev = nil
                 // Only when there is NO surface here at all do we plant a
                 // freestyle patch (uneven facades). Detected walls always win,
                 // so painting stays glued to the real wall.
-                if spraying, lastTime - lastPatchSpawn > 0.7 {
+                if spraying, capReady, lastTime - lastPatchSpawn > 0.7 {
                     let query = view.raycastQuery(from: viewCenter,
                                                   allowing: .estimatedPlane,
                                                   alignment: .any)

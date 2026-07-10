@@ -21,7 +21,9 @@ struct SprayCap {
     let holeFrac: CGFloat      // >0 → ring pattern with a clean hole in the middle
     let chisel: Bool           // flat line footprint that rotates with the phone
     let dripMaxM: Double       // drips only closer than this (0 = never drips)
-    let icon: CGFloat          // UI dot size (0 = bar icon)
+    let icon: CGFloat          // UI dot size
+    let dirty: Bool            // fire-extinguisher blast: splatters + heavy drips
+    let custom: Bool           // user-drawn spray shape (blank cap)
 }
 
 /// Shared state between the SwiftUI overlay and the AR coordinator.
@@ -50,6 +52,10 @@ final class PaintState: ObservableObject {
     @Published var toast: String? = nil
     @Published var torchOn = false
     @Published var editingPlane = false
+    @Published var pressureBoost = 0            // index into [x1, x5, x10]
+    @Published var dashMode = 0                 // .0 solid · .1 · .2 dotted line
+    @Published var customShape: [CGPoint] = []  // normalized user-drawn cap
+    @Published var drawingShape = false
 
     // commands consumed by the AR coordinator
     var clearRequested = false
@@ -61,13 +67,23 @@ final class PaintState: ObservableObject {
 
     static let nozzles: [SprayCap] = [
         SprayCap(name: "Pink dot", deg: 2.2, dotScale: 0.15, countScale: 4.5,
-                 scatterScale: 0.5, holeFrac: 0, chisel: false, dripMaxM: 0.6, icon: 5),
+                 scatterScale: 0.5, holeFrac: 0, chisel: false, dripMaxM: 0.6, icon: 5,
+                 dirty: false, custom: false),
         SprayCap(name: "Cyclops", deg: 6.5, dotScale: 0.5, countScale: 1.6,
-                 scatterScale: 0.6, holeFrac: 0.45, chisel: false, dripMaxM: 0, icon: 11),
+                 scatterScale: 0.6, holeFrac: 0.45, chisel: false, dripMaxM: 0, icon: 11,
+                 dirty: false, custom: false),
         SprayCap(name: "Beef", deg: 13.0, dotScale: 1.0, countScale: 1.0,
-                 scatterScale: 1.0, holeFrac: 0, chisel: false, dripMaxM: 0.35, icon: 17),
+                 scatterScale: 1.0, holeFrac: 0, chisel: false, dripMaxM: 0.35, icon: 17,
+                 dirty: false, custom: false),
         SprayCap(name: "Chisel", deg: 8.0, dotScale: 0.6, countScale: 1.4,
-                 scatterScale: 0.3, holeFrac: 0, chisel: true, dripMaxM: 0.30, icon: 0),
+                 scatterScale: 0.3, holeFrac: 0, chisel: true, dripMaxM: 0.30, icon: 0,
+                 dirty: false, custom: false),
+        SprayCap(name: "Dirty", deg: 16.0, dotScale: 1.4, countScale: 0.8,
+                 scatterScale: 1.4, holeFrac: 0, chisel: false, dripMaxM: 0.9, icon: 0,
+                 dirty: true, custom: false),
+        SprayCap(name: "Your cap", deg: 7.0, dotScale: 0.5, countScale: 1.2,
+                 scatterScale: 0.2, holeFrac: 0, chisel: false, dripMaxM: 0.30, icon: 0,
+                 dirty: false, custom: true),
     ]
 
     func showToast(_ msg: String) {
