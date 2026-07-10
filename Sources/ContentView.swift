@@ -8,6 +8,11 @@ struct ContentView: View {
             ARSprayView(state: state)
                 .ignoresSafeArea()
 
+            if state.editingPlane {
+                EditTouchLayer(state: state)
+                    .ignoresSafeArea()
+            }
+
             // crosshair
             if state.aimedAtWall {
                 Circle()
@@ -39,6 +44,20 @@ struct ContentView: View {
                             .foregroundColor(.red)
                     }
                     Spacer()
+                    Button(action: { state.editToggleRequested = true }) {
+                        Image(systemName: "square.dashed")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundColor(state.editingPlane ? .orange : .white)
+                            .frame(width: 38, height: 38)
+                            .background(.ultraThinMaterial, in: Circle())
+                    }
+                    Button(action: { state.exportRequested = true }) {
+                        Image(systemName: "square.and.arrow.down")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundColor(.white)
+                            .frame(width: 38, height: 38)
+                            .background(.ultraThinMaterial, in: Circle())
+                    }
                     Button(action: { state.torchOn.toggle() }) {
                         Image(systemName: state.torchOn ? "flashlight.on.fill" : "flashlight.off.fill")
                             .font(.system(size: 16, weight: .semibold))
@@ -130,6 +149,28 @@ struct ContentView: View {
                 .transition(.opacity)
             }
         }
+    }
+}
+
+/// Full-screen layer that forwards touches to the plane editor while editing.
+struct EditTouchLayer: View {
+    @ObservedObject var state: PaintState
+    @State private var began = false
+
+    var body: some View {
+        Color.clear
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                    .onChanged { v in
+                        state.editTouch = (v.location, began ? 2 : 1)
+                        began = true
+                    }
+                    .onEnded { v in
+                        state.editTouch = (v.location, 3)
+                        began = false
+                    }
+            )
     }
 }
 

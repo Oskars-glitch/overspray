@@ -1,6 +1,30 @@
 import UIKit
 import CoreGraphics
 
+/// The can itself: output pressure drops the longer you spray (paint gets
+/// lighter) and shaking restores it. Shakes also build CHARGE, which throws
+/// big splashy droplets at the beginning of the next spray — more shakes,
+/// more splashes.
+final class CanPhysics {
+    static let shared = CanPhysics()
+    private(set) var pressure: Double = 1.0
+    private(set) var charge: Double = 0
+
+    func tick(spraying: Bool, dt: Double) {
+        if spraying {
+            pressure = max(0.45, pressure - dt * 0.05)   // noticeably lighter after ~10 s
+            charge = max(0, charge - dt * 0.9)           // splashes fade over ~2 s of spraying
+        } else {
+            pressure = min(1.0, pressure + dt * 0.008)   // barely recovers on its own
+        }
+    }
+
+    func shaken(strong: Bool) {
+        pressure = min(1.0, pressure + (strong ? 0.16 : 0.07))
+        charge = min(3.0, charge + (strong ? 0.8 : 0.35))
+    }
+}
+
 /// Spray physics. Draws through a PaintCanvas (tiled, GPU-backed).
 ///
 /// Realism model:
@@ -73,7 +97,9 @@ final class SprayEngine {
         let pathLen = hypot(to.x - from.x, to.y - from.y)
         let speedM = Double(pathLen / ppm) / max(dt, 0.001)
         let still = pow(max(0.0, 1.0 - speedM / 0.30), 1.5)
-        let stamps = max(1, min(16, Int(ceil(Double(pathLen) / max(6.0, radius * 0.45)))))
+        let stamps = max(1, min(28, Int(ceil(Double(pathLen) / max(4.0, radius * 0.22)))))
+        let pressure = CGFloat(0.5 + 0.5 * CanPhysics.shared.pressure)
+        let charge = CGFloat(CanPhysics.shared.charge)
         for s in 1...stamps {
             let f = CGFloat(s) / CGFloat(stamps)
             let p = CGPoint(x: from.x + (to.x - from.x) * f,
@@ -81,14 +107,16 @@ final class SprayEngine {
             stamp(at: p, d: CGFloat(d), k: k, R: CGFloat(radius), color: color,
                   dtShare: dt / Double(stamps), still: CGFloat(still),
                   stretch: stretch, sd: stretchDir, roll: rollDir,
-                  budgetShare: max(1, stamps), cap: cap)
+                  budgetShare: max(1, stamps), cap: cap,
+                  pressure: pressure, charge: charge)
         }
     }
 
     private func stamp(at c: CGPoint, d: CGFloat, k: CGFloat, R: CGFloat,
                        color: CGColor, dtShare: Double, still: CGFloat,
                        stretch: CGFloat, sd: CGVector, roll: CGVector,
-                       budgetShare: Int, cap: SprayCap) {
+                       budgetShare: Int, cap: SprayCap,
+                       pressure: CGFloat, charge: CGFloat) {
         @inline(__always) func place(_ ox: CGFloat, _ oy: CGFloat) -> CGPoint {
             CGPoint(x: c.x + sd.dx * ox * stretch - sd.dy * oy,
                     y: c.y + sd.dy * ox * stretch + sd.dx * oy)
@@ -101,7 +129,10 @@ final class SprayEngine {
         // OPAQUE dot field: density carries the look, never transparency.
         let close = min(1, max(0, (0.85 - d) / 0.85))
         let sigma = R * (0.30 + 0.50 * (1 - close)) * cap.scatterScale
-        var count = Int((60 + 240 * close) * k * 5 * cap.countScale)
+        // fine caps (pink dot) fade toward invisibility with distance instead
+        // of staying razor-sharp: fewer dots land the farther you are
+        let fineFade = cap.dotScale < 0.3 ? pow(close, 0.7) : 1.0
+        var count = Int((60 + 240 * close) * k * 5 * cap.countScale * fineFade * pressure)
         count = min(count, max(80, 5500 / budgetShare))  // frame budget on fast sweeps
         let mm = ppm / 1000
 
@@ -118,6 +149,14 @@ final class SprayEngine {
                 let a = rnd() * .pi * 2
                 p = placeWorld(cos(a) * rr + gaussRnd() * R * 0.04,
                                sin(a) * rr + gaussRnd() * R * 0.04)
+            } else if cap.dotScale < 0.3 {
+                // pink dot: tight core BUT ~22% of droplets stray into a soft
+                // halo so the line has organic scatter, never a hard contour
+                if rnd() < 0.22 {
+                    p = place(gaussRnd() * sigma * 2.6, gaussRnd() * sigma * 2.6)
+                } else {
+                    p = place(gaussRnd() * sigma, gaussRnd() * sigma)
+                }
             } else {
                 p = place(gaussRnd() * sigma, gaussRnd() * sigma)
             }
@@ -138,6 +177,12 @@ final class SprayEngine {
         if !cap.chisel, d > 0.3, rnd() < 0.06 * Double(cap.scatterScale) {
             let p = place(gaussRnd() * R * 0.8, gaussRnd() * R * 0.8)
             canvas.fillDot(p.x, p.y, (0.5 + rnd() * 0.9) * mm * 2, color)
+        }
+
+        // freshly shaken can: big splashy droplets at the start of the spray
+        if charge > 0.05, rnd() < 0.12 * charge {
+            let p = place(gaussRnd() * sigma * 0.9, gaussRnd() * sigma * 0.9)
+            canvas.fillDot(p.x, p.y, (1.5 + rnd() * 3.0) * mm * (1 + 0.5 * charge), color)
         }
 
         accumulate(at: c, d: d, k: k, R: R, color: color,

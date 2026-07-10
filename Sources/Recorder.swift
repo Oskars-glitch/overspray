@@ -179,8 +179,8 @@ final class VolumeSpray: NSObject {
         let session = AVAudioSession.sharedInstance()
         observation = session.observe(\.outputVolume, options: [.new, .old]) { [weak self] _, change in
             guard let self, !self.suppressObservation else { return }
-            guard let new = change.newValue, let old = change.oldValue, new <= old else { return }
-            self.pulse()
+            guard let new = change.newValue, let old = change.oldValue, new != old else { return }
+            self.pulse(up: new > old)   // volume-UP sprays white, DOWN sprays black
         }
         if #available(iOS 17.2, *) {
             let interaction = AVCaptureEventInteraction(
@@ -199,10 +199,15 @@ final class VolumeSpray: NSObject {
         }
     }
 
-    private func pulse() {
+    private func setColor(white: Bool) {
+        DispatchQueue.main.async { self.state?.colorIndex = white ? 1 : 0 }
+    }
+
+    private func pulse(up: Bool) {
+        setColor(white: up)
         setHolding(true)
         releaseTimer?.invalidate()
-        releaseTimer = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: false) { [weak self] _ in
+        releaseTimer = Timer.scheduledTimer(withTimeInterval: 0.30, repeats: false) { [weak self] _ in
             self?.setHolding(false)
         }
         resetWorkItem?.cancel()
@@ -220,6 +225,9 @@ final class VolumeSpray: NSObject {
     private func setHolding(_ on: Bool) {
         guard holding != on else { return }
         holding = on
-        DispatchQueue.main.async { self.state?.spraying = on }
+        DispatchQueue.main.async {
+            self.state?.spraying = on
+            SoundKit.shared.setSpraying(on)   // instant audio, no frame of delay
+        }
     }
 }

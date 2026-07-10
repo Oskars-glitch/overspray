@@ -100,3 +100,8 @@ Missing files are fine — the app simply stays silent.
 Recordings now include the microphone (ambient room sound). The mic only
 switches on while you're recording; iOS will ask permission the first
 time you press record.
+
+### More optional sounds
+
+- `shake_echo_01.mp3`…`03` (or `shake_echo.mp3`): a fading rattle tail
+  played automatically when you STOP shaking, so it never cuts off flat.

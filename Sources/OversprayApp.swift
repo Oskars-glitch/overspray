@@ -49,11 +49,15 @@ final class PaintState: ObservableObject {
     @Published var aimedAtWall = false
     @Published var toast: String? = nil
     @Published var torchOn = false
+    @Published var editingPlane = false
 
     // commands consumed by the AR coordinator
     var clearRequested = false
     var toggleRecordRequested = false
     var rescanRequested = false
+    var editToggleRequested = false
+    var exportRequested = false
+    var editTouch: (point: CGPoint, phase: Int)? = nil   // 1 began · 2 moved · 3 ended
 
     static let nozzles: [SprayCap] = [
         SprayCap(name: "Pink dot", deg: 2.2, dotScale: 0.15, countScale: 4.5,

@@ -26,6 +26,7 @@ final class PaintCanvas {
     var onBudgetExceeded: (() -> Void)?
 
     private var tiles: [Int: Tile] = [:]
+    private(set) var contentRect: CGRect?          // union of everything painted
 
     final class Tile {
         let ctx: CGContext
@@ -125,6 +126,7 @@ final class PaintCanvas {
                 body(t, ox, oy)
                 let local = rect.offsetBy(dx: -ox, dy: -oy)
                 t.dirty = t.dirty?.union(local) ?? local
+                contentRect = contentRect?.union(rect) ?? rect
             }
         }
     }
@@ -185,6 +187,34 @@ final class PaintCanvas {
         }
     }
 
+    /// Full-resolution composite of everything painted, transparent background.
+    func exportImage() -> CGImage? {
+        guard var box = contentRect, !tiles.isEmpty else { return nil }
+        box = box.insetBy(dx: -16, dy: -16)
+            .intersection(CGRect(x: 0, y: 0, width: sizePx, height: sizePx))
+        guard box.width > 4, box.height > 4 else { return nil }
+        // cap the output so a huge painted area cannot exhaust memory
+        let scale = min(1, 8192 / max(box.width, box.height))
+        let w = Int(box.width * scale), h = Int(box.height * scale)
+        let cs = CGColorSpaceCreateDeviceRGB()
+        guard let out = CGContext(data: nil, width: w, height: h,
+                                  bitsPerComponent: 8, bytesPerRow: 0, space: cs,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        let tp = CGFloat(PaintCanvas.tilePx)
+        for (key, t) in tiles {
+            guard let img = t.ctx.makeImage() else { continue }
+            let col = key % tilesPerSide, row = key / tilesPerSide
+            let ox = CGFloat(col) * tp - box.minX
+            let oy = CGFloat(row) * tp - box.minY
+            // CG places images bottom-up: convert the tile's top-left origin
+            out.draw(img, in: CGRect(x: ox * scale,
+                                     y: (box.height - oy - tp) * scale,
+                                     width: tp * scale, height: tp * scale))
+        }
+        return out.makeImage()
+    }
+
     func clearAll() {
         let size = PaintCanvas.tilePx
         for t in tiles.values {
@@ -195,6 +225,7 @@ final class PaintCanvas {
             }
             t.dirty = nil
         }
+        contentRect = nil
     }
 
     func teardown() {

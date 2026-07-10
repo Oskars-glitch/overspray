@@ -20,6 +20,7 @@ final class SoundKit {
         reassertSession()
         sprayURLs = urls(for: ["spray_01", "spray_02", "spray_03", "spray"])
         shakeURLs = urls(for: ["shake_01", "shake_02", "shake_03", "shake", "skahe"])
+        echoURLs = urls(for: ["shake_echo_01", "shake_echo_02", "shake_echo_03", "shake_echo"])
         startShakeDetection()
     }
 
@@ -58,6 +59,9 @@ final class SoundKit {
     private var strongHits: [TimeInterval] = []
     private var softHits: [TimeInterval] = []
     private var currentShake: AVAudioPlayer?
+    private var echoURLs: [URL] = []
+    private var shakingWasActive = false
+    private var lastShakeVolume: Float = 1.0
 
     private func startShakeDetection() {
         guard motion.isDeviceMotionAvailable else { return }
@@ -73,10 +77,28 @@ final class SoundKit {
             self.softHits.removeAll { now - $0 > 0.5 }
             let strong = self.strongHits.count >= 2
             let soft = self.softHits.count >= 2
-            if (strong || soft), self.currentShake?.isPlaying != true {
+            let active = strong || soft
+            if active, self.currentShake?.isPlaying != true {
                 self.playShake(volume: strong ? 1.0 : 0.5)
+                CanPhysics.shared.shaken(strong: strong)
             }
+            // shaking just STOPPED → play a fading echo tail so it never cuts flat
+            if self.shakingWasActive, !active, self.currentShake?.isPlaying != true {
+                self.playEcho()
+            }
+            self.shakingWasActive = active || self.currentShake?.isPlaying == true
         }
+    }
+
+    private func playEcho() {
+        guard shakingWasActive else { return }
+        shakingWasActive = false
+        guard let url = echoURLs.randomElement() else { return }
+        guard let p = try? AVAudioPlayer(contentsOf: url) else { return }
+        p.volume = lastShakeVolume
+        p.play()
+        oneShots.append(p)
+        oneShots.removeAll { !$0.isPlaying && $0 !== p }
     }
 
     private var lastShakeIndex = -1
@@ -89,6 +111,7 @@ final class SoundKit {
             idx = (idx + 1 + Int.random(in: 0..<(shakeURLs.count - 1))) % shakeURLs.count
         }
         lastShakeIndex = idx
+        lastShakeVolume = volume
         guard let p = try? AVAudioPlayer(contentsOf: shakeURLs[idx]) else { return }
         p.volume = volume
         p.play()
