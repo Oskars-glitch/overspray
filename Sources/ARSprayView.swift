@@ -533,7 +533,7 @@ final class PaintSurface {
     let node: SCNNode                      // paint root, rotated into the wall
     private(set) var engine: SprayEngine?
     private var canvas: PaintCanvas?
-    private var anchorTransform: simd_float4x4
+    private(set) var anchorTransform: simd_float4x4
     private let dripDirLocal: CGVector
 
     init(id: UUID, transform: simd_float4x4) {
