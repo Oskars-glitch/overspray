@@ -46,12 +46,13 @@ final class PaintState: ObservableObject {
     @Published var pickPreview: UIColor = .gray
 
     // feedback
-    @Published var status = "Move your phone slowly to scan for walls"
+    @Published var status = "Scan slowly · then aim at the wall and tap SET WALL"
     @Published var wallCount = 0
     @Published var aimedAtWall = false
     @Published var toast: String? = nil
     @Published var torchOn = false
-    @Published var editingPlane = false
+    @Published var editingPlane = false          // lasso edit mode
+    @Published var wallSet = false               // has the user designated a wall?
     @Published var pressureBoost = 0            // index into [x1, x5, x10]
     @Published var dashMode = 0                 // .0 solid · .1 · .2 dotted line
     @Published var customShape: [CGPoint] = []  // normalized user-drawn cap
@@ -63,6 +64,7 @@ final class PaintState: ObservableObject {
     var rescanRequested = false
     var editToggleRequested = false
     var exportRequested = false
+    var setWallRequested = false
     var editTouch: (point: CGPoint, phase: Int)? = nil   // 1 began · 2 moved · 3 ended
 
     static let nozzles: [SprayCap] = [

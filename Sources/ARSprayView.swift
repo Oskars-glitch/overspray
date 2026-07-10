@@ -5,6 +5,11 @@ import SceneKit
 import Metal
 import AVFoundation
 
+/// ONE user-designated wall. ARKit's plane detection only helps you AIM;
+/// tapping SET WALL freezes that plane as yours. Painting raycasts against
+/// the infinite plane directly — no fragmenting, no strobing, no phantom
+/// walls, and the paintable area (lasso-editable mask) can grow as large as
+/// the 12 m canvas.
 struct ARSprayView: UIViewRepresentable {
     let state: PaintState
 
@@ -14,7 +19,7 @@ struct ARSprayView: UIViewRepresentable {
         let view = ARSCNView(frame: .zero)
         view.delegate = context.coordinator
         view.session.delegate = context.coordinator
-        view.automaticallyUpdatesLighting = false      // we drive lighting ourselves
+        view.automaticallyUpdatesLighting = false
         view.rendersContinuously = true
         context.coordinator.arView = view
         context.coordinator.setupLights()
@@ -34,25 +39,24 @@ struct ARSprayView: UIViewRepresentable {
     final class Coordinator: NSObject, ARSCNViewDelegate, ARSessionDelegate {
         let state: PaintState
         weak var arView: ARSCNView?
-        private var surfaces: [UUID: PaintSurface] = [:]
+        private var wall: PaintSurface?
         private var recorder = Recorder()
         private var lastTime: TimeInterval = 0
-        private var sprayPrev: (UUID, CGPoint)?
+        private var sprayPrev: CGPoint?
         private let device = MTLCreateSystemDefaultDevice()
         private let tileBudget = TileBudget()
         private var camLight: SCNLight?
         private var ambientLight: SCNLight?
         private var torchApplied = false
         private var wasSpraying = false
-        private var lastPatchSpawn: TimeInterval = 0
-        private var patchToastShown = false
-        private var editingSurface: PaintSurface?
-        private var grabbedVertex: Int?
-        private var lastHitSurfaceID: UUID?
         private var lastAudible = true
-        private let viewSize = UIScreen.main.bounds.size
+        private var planeSeen = false
+        // lasso editing
+        private var lassoStroke: [CGPoint] = []      // texture px
+        private var lassoAdd = true
         private var viewCenter = CGPoint(x: UIScreen.main.bounds.midX,
                                          y: UIScreen.main.bounds.midY)
+        private let viewSize = UIScreen.main.bounds.size
 
         init(state: PaintState) { self.state = state; super.init() }
 
@@ -62,13 +66,11 @@ struct ARSprayView: UIViewRepresentable {
             config.planeDetection = [.vertical]
             config.environmentTexturing = .none
             view.session.run(config, options: reset ? [.resetTracking, .removeExistingAnchors] : [])
-            if state.torchOn {                        // session restarts can drop the torch
+            if state.torchOn {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.setTorch(true) }
             }
         }
 
-        /// Base ambient (subtle 5–10% response to real room light) is created
-        /// once; the camera spotlight powers the flashlight look on the paint.
         func setupLights() {
             guard let view = arView else { return }
             let amb = SCNLight()
@@ -81,42 +83,31 @@ struct ARSprayView: UIViewRepresentable {
             ambientLight = amb
         }
 
-        // MARK: plane lifecycle
+        // MARK: plane lifecycle — detection only helps aiming / follows the wall
 
         func renderer(_ renderer: SCNSceneRenderer, didAdd node: SCNNode, for anchor: ARAnchor) {
-            var surface: PaintSurface?
-            if let plane = anchor as? ARPlaneAnchor, plane.alignment == .vertical {
-                surface = PaintSurface(id: plane.identifier, transform: plane.transform)
-            } else if anchor.name == "patch" {
-                // freestyle patch: planted where you sprayed on an ESTIMATED
-                // surface (uneven facades ARKit couldn't turn into a plane)
-                surface = PaintSurface(id: anchor.identifier, transform: anchor.transform)
-            }
-            guard let surface = surface else { return }
-            surfaces[surface.id] = surface
-            node.addChildNode(surface.node)
-            DispatchQueue.main.async {
-                self.state.wallCount = self.surfaces.count
-                if self.surfaces.count == 1 {
-                    self.state.status = "Wall found — hold the cap to spray"
-                    self.state.showToast("Wall detected · paint sticks to it automatically")
+            guard let plane = anchor as? ARPlaneAnchor, plane.alignment == .vertical else { return }
+            if !planeSeen {
+                planeSeen = true
+                DispatchQueue.main.async {
+                    if !self.state.wallSet {
+                        self.state.status = "Plane found — aim at it and tap SET WALL"
+                    }
                 }
-                self.arView?.debugOptions = []
             }
         }
 
         func renderer(_ renderer: SCNSceneRenderer, didUpdate node: SCNNode, for anchor: ARAnchor) {
             guard let plane = anchor as? ARPlaneAnchor else { return }
-            surfaces[plane.identifier]?.updateTransform(plane.transform)
-            surfaces[plane.identifier]?.captureBoundary(plane)
+            // our wall follows ARKit's refinements of the anchor it came from
+            if let w = wall, w.followsAnchor == plane.identifier {
+                w.updateTransform(plane.transform)
+            }
         }
 
         func renderer(_ renderer: SCNSceneRenderer, didRemove node: SCNNode, for anchor: ARAnchor) {
-            if let plane = anchor as? ARPlaneAnchor {
-                surfaces[plane.identifier]?.teardown()
-                surfaces.removeValue(forKey: plane.identifier)
-                DispatchQueue.main.async { self.state.wallCount = self.surfaces.count }
-            }
+            // if ARKit merges away our source anchor, the wall simply stays
+            // frozen at its last (good) transform — paint never disappears
         }
 
         // MARK: per-frame tick (render thread)
@@ -127,7 +118,7 @@ struct ARSprayView: UIViewRepresentable {
 
             if state.clearRequested {
                 state.clearRequested = false
-                for s in surfaces.values { s.engine?.clear() }
+                wall?.engine?.clear()
                 state.showToast("Wall cleared")
             }
             if state.toggleRecordRequested {
@@ -140,7 +131,7 @@ struct ARSprayView: UIViewRepresentable {
             }
             if state.editToggleRequested {
                 state.editToggleRequested = false
-                toggleEditing()
+                toggleLasso()
             }
             if state.exportRequested {
                 state.exportRequested = false
@@ -150,7 +141,6 @@ struct ARSprayView: UIViewRepresentable {
 
             guard let view = arView, let frame = view.session.currentFrame else { return }
 
-            // barely-there room-light response (≈ ±2%)
             if let est = frame.lightEstimate {
                 let e = min(2000, max(200, est.ambientIntensity))
                 let target = 985 + 0.02 * e
@@ -168,28 +158,32 @@ struct ARSprayView: UIViewRepresentable {
                                                       camTransform.columns.0.y,
                                                       camTransform.columns.0.z))
 
-            var hit: (surface: PaintSurface, tex: CGPoint, dist: Double,
-                      stretch: CGFloat, sdir: CGVector, roll: CGVector)?
+            if state.setWallRequested {
+                state.setWallRequested = false
+                setWall(view: view, camPos: camPos, camFwd: camFwd)
+            }
 
-            // ONLY a real detected plane counts — tight, consistent, glued to
-            // the wall. One correct wall, exactly like the reliable behaviour.
-            if let query = view.raycastQuery(from: viewCenter,
-                                             allowing: .existingPlaneGeometry,
-                                             alignment: .vertical),
-               let result = view.session.raycast(query).first,
-               let anchor = result.anchor as? ARPlaneAnchor,
-               let surface = surfaces[anchor.identifier] {
-                let world = result.worldTransform.position
-                let dist = Double(simd_length(world - camPos))
-                if dist > 0.02, let tex = surface.texturePoint(worldPoint: world) {
-                    let (stretch, sdir) = surface.obliqueness(rayDir: camFwd)
-                    hit = (surface, tex, dist, stretch, sdir,
-                           surface.rollDirection(cameraRight: camRight))
+            // painting hits OUR wall's infinite plane — steady, no strobing
+            var hit: (tex: CGPoint, dist: Double, stretch: CGFloat,
+                      sdir: CGVector, roll: CGVector)?
+            if let w = wall, let t = w.rayHit(origin: camPos, dir: camFwd), t < 8 {
+                let world = camPos + camFwd * t
+                if let tex = w.texturePoint(worldPoint: world) {
+                    let (stretch, sdir) = w.obliqueness(rayDir: camFwd)
+                    hit = (tex, Double(t), stretch, sdir,
+                           w.rollDirection(cameraRight: camRight))
                 }
             }
 
-            lastHitSurfaceID = hit?.surface.id
-            let aimed = hit != nil
+            // before a wall is set, the crosshair shows where SET WALL would land
+            var aimed = hit != nil
+            if wall == nil {
+                if let query = view.raycastQuery(from: viewCenter,
+                                                 allowing: .existingPlaneGeometry,
+                                                 alignment: .vertical) {
+                    aimed = !view.session.raycast(query).isEmpty
+                }
+            }
             if aimed != state.aimedAtWall {
                 DispatchQueue.main.async { self.state.aimedAtWall = aimed }
             }
@@ -199,22 +193,22 @@ struct ARSprayView: UIViewRepresentable {
             let shape = cap.custom ? state.customShape : []
             let capReady = !(cap.custom && shape.count < 2)
             CanPhysics.shared.tick(spraying: spraying && hit != nil, dt: dt)
-            handleEditTouch(renderer: renderer)
+            handleLassoTouch(view: view)
             if spraying != wasSpraying {
                 wasSpraying = spraying
                 if spraying {
                     CanPhysics.shared.dashReset()
-                    if !capReady { state.showToast("Draw your cap first — tap the blank cap again") }
+                    if wall == nil { state.showToast("Tap SET WALL first") }
+                    else if !capReady { state.showToast("Draw your cap first — tap the blank cap again") }
                 }
                 DispatchQueue.main.async { SoundKit.shared.setSpraying(spraying) }
             }
 
-            if spraying, capReady, let h = hit, h.surface.contains(h.tex) {
-                if let engine = ensureEngine(h.surface) {
+            if spraying, capReady, let w = wall, let h = hit, w.contains(h.tex) {
+                if let engine = ensureEngine(w) {
                     let color = state.colors[state.colorIndex].cgColor
                     let boost: CGFloat = [1, 5, 10][state.pressureBoost]
-                    var from = h.tex
-                    if let prev = sprayPrev, prev.0 == h.surface.id { from = prev.1 }
+                    let from = sprayPrev ?? h.tex
                     engine.sprayStroke(from: from, to: h.tex,
                                        distance: h.dist, cap: cap,
                                        color: color, dt: dt,
@@ -222,9 +216,8 @@ struct ARSprayView: UIViewRepresentable {
                                        rollDir: h.roll,
                                        boost: boost, dashMode: state.dashMode,
                                        shape: shape)
-                    sprayPrev = (h.surface.id, h.tex)
+                    sprayPrev = h.tex
                 }
-                // dotted-line attachment: spray audio only on painted segments
                 let audible = state.dashMode == 0 || CanPhysics.shared.dashOn
                 if audible != lastAudible {
                     lastAudible = audible
@@ -238,25 +231,119 @@ struct ARSprayView: UIViewRepresentable {
                 sprayPrev = nil
             }
 
-            // live color picking: long-press a swatch, drag over the camera view
             if state.pickingColorIndex != nil {
-                let ui = sampleCameraColor(frame: frame, at: state.pickPoint)
-                if let ui = ui {
+                if let ui = sampleCameraColor(frame: frame, at: state.pickPoint) {
                     DispatchQueue.main.async { self.state.pickPreview = ui }
                 }
             }
 
-            for s in surfaces.values {
-                s.engine?.stepDrips(dt: dt)
-                s.engine?.flush()
+            wall?.engine?.stepDrips(dt: dt)
+            wall?.engine?.flush()
+        }
+
+        // MARK: SET WALL — the one deliberate designation
+
+        private func setWall(view: ARSCNView, camPos: simd_float3, camFwd: simd_float3) {
+            guard wall == nil else { return }
+            var transform: simd_float4x4?
+            var follow: UUID?
+            var boundaryTex: [CGPoint] = []
+            var hitWorld: simd_float3?
+
+            // best source: ARKit's detected plane (accurate depth + normal)
+            if let query = view.raycastQuery(from: viewCenter,
+                                             allowing: .existingPlaneGeometry,
+                                             alignment: .vertical),
+               let result = view.session.raycast(query).first,
+               let plane = result.anchor as? ARPlaneAnchor {
+                transform = plane.transform
+                follow = plane.identifier
+                hitWorld = result.worldTransform.position
+                boundaryTex = PaintSurface.boundaryTexPoints(of: plane)
+            } else if let query = view.raycastQuery(from: viewCenter,
+                                                    allowing: .estimatedPlane,
+                                                    alignment: .vertical),
+                      let result = view.session.raycast(query).first {
+                transform = result.worldTransform
+                hitWorld = result.worldTransform.position
+                state.showToast("Using estimated surface — scan more for precision")
+            }
+
+            guard let t = transform else {
+                state.showToast("No wall under the crosshair — scan a bit more")
+                return
+            }
+            let w = PaintSurface(transform: t, followsAnchor: follow)
+            view.scene.rootNode.addChildNode(w.rootNode)
+            if boundaryTex.count >= 3 {
+                w.applyLasso(boundaryTex, add: true)
+            } else if let hw = hitWorld, let tex = w.texturePoint(worldPoint: hw) {
+                w.seedSquare(center: tex, halfMeters: 1.2)
+            } else {
+                w.seedSquare(center: CGPoint(x: w.canvasPx / 2, y: w.canvasPx / 2), halfMeters: 1.2)
+            }
+            wall = w
+            sprayPrev = nil
+            arView?.debugOptions = []
+            DispatchQueue.main.async {
+                self.state.wallSet = true
+                self.state.status = "Wall set — spray away · lasso to reshape"
             }
         }
+
+        // MARK: lasso editing — inside adds, outside cuts
+
+        private func toggleLasso() {
+            if state.editingPlane {
+                wall?.hideEditor()
+                lassoStroke = []
+                DispatchQueue.main.async { self.state.editingPlane = false }
+                return
+            }
+            guard let w = wall else {
+                state.showToast("Set the wall first")
+                return
+            }
+            w.showEditor()
+            DispatchQueue.main.async { self.state.editingPlane = true }
+            state.showToast("Lasso: start INSIDE to add · OUTSIDE to cut")
+        }
+
+        private func handleLassoTouch(view: ARSCNView) {
+            guard state.editingPlane, let w = wall, let touch = state.editTouch else { return }
+            state.editTouch = nil
+            guard let world = view.unprojectPoint(touch.point, ontoPlane: w.anchorTransform),
+                  let tex = w.texturePointClamped(worldPoint: world) else {
+                if touch.phase == 3, lassoStroke.count >= 3 {
+                    w.applyLasso(lassoStroke, add: lassoAdd)
+                    lassoStroke = []
+                }
+                return
+            }
+            switch touch.phase {
+            case 1:
+                lassoAdd = w.maskIsEmpty || w.contains(tex)
+                lassoStroke = [tex]
+                w.previewLasso(lassoStroke, add: lassoAdd)
+            case 2:
+                lassoStroke.append(tex)
+                w.previewLasso(lassoStroke, add: lassoAdd)
+            default:
+                lassoStroke.append(tex)
+                if lassoStroke.count >= 3 {
+                    w.applyLasso(lassoStroke, add: lassoAdd)
+                }
+                lassoStroke = []
+            }
+        }
+
+        // MARK: engine allocation
 
         private func ensureEngine(_ surface: PaintSurface) -> SprayEngine? {
             if let e = surface.engine { return e }
             guard let device = device else { return nil }
             surface.allocateEngine(device: device, budget: tileBudget) { [weak self] in
-                self?.state.showToast("Paint area limit reached — Clear or Rescan")
+                self?.state.showToast("Paint area limit reached — Clear to continue")
             }
             return surface.engine
         }
@@ -304,123 +391,24 @@ struct ARSprayView: UIViewRepresentable {
         // MARK: rescan
 
         private func rescan() {
-            for s in surfaces.values { s.teardown(); s.node.removeFromParentNode() }
-            surfaces.removeAll()
+            wall?.teardown()
+            wall = nil
             tileBudget.warned = false
             sprayPrev = nil
+            lassoStroke = []
+            planeSeen = false
             runSession(reset: true)
             arView?.debugOptions = [.showFeaturePoints]
-            state.wallCount = 0
-            state.status = "Move your phone slowly to scan for walls"
+            state.wallSet = false
+            state.editingPlane = false
+            state.status = "Scan slowly · then aim at the wall and tap SET WALL"
             state.showToast("Rescanning…")
-        }
-
-        // MARK: plane editing — drag dots, tap to add one (away from others)
-
-        private func toggleEditing() {
-            if let s = editingSurface {
-                s.hideEditor()
-                editingSurface = nil
-                grabbedVertex = nil
-                DispatchQueue.main.async { self.state.editingPlane = false }
-                return
-            }
-            guard let id = lastHitSurfaceID, let s = surfaces[id] else {
-                state.showToast("Aim at a wall first, then edit its shape")
-                DispatchQueue.main.async { self.state.editingPlane = false }
-                return
-            }
-            if s.polygon.count < 3 {
-                if s.detectedBoundary.count >= 3 {
-                    s.polygon = s.detectedBoundary        // start from the SCANNED shape
-                } else {
-                    // freestyle patch: start from a simple centred square
-                    let c = PaintSurface.sizeMeters * PaintCanvas.ppm / 2
-                    let half = PaintCanvas.ppm * 0.7
-                    s.polygon = [CGPoint(x: c - half, y: c - half),
-                                 CGPoint(x: c + half, y: c - half),
-                                 CGPoint(x: c + half, y: c + half),
-                                 CGPoint(x: c - half, y: c + half)]
-                }
-            }
-            s.rebuildEditor()
-            editingSurface = s
-            DispatchQueue.main.async { self.state.editingPlane = true }
-            state.showToast("Drag dots to reshape · tap empty spot to add a dot")
-        }
-
-        private func handleEditTouch(renderer: SCNSceneRenderer) {
-            guard let s = editingSurface, let touch = state.editTouch else { return }
-            state.editTouch = nil
-            guard let view = arView,
-                  let world = view.unprojectPoint(touch.point, ontoPlane: s.anchorTransform),
-                  let tex = texClamped(s, world: world) else {
-                if touch.phase == 3 { grabbedVertex = nil }
-                return
-            }
-            switch touch.phase {
-            case 1:
-                // nearest vertex on SCREEN: <34 pt grabs · 34–60 dead zone · >60 adds
-                var best = -1
-                var bestD = CGFloat.greatestFiniteMagnitude
-                for (i, p) in s.polygon.enumerated() {
-                    let w = s.worldPoint(tex: p)
-                    let pr = renderer.projectPoint(SCNVector3(w.x, w.y, w.z))
-                    let dd = hypot(CGFloat(pr.x) - touch.point.x, CGFloat(pr.y) - touch.point.y)
-                    if dd < bestD { bestD = dd; best = i }
-                }
-                if bestD < 34 {
-                    grabbedVertex = best
-                } else if bestD > 60 {
-                    grabbedVertex = insertVertex(into: s, at: tex)
-                    s.rebuildEditor()
-                }
-            case 2:
-                if let g = grabbedVertex, g < s.polygon.count {
-                    s.polygon[g] = tex
-                    s.rebuildEditor()
-                }
-            default:
-                grabbedVertex = nil
-            }
-        }
-
-        private func texClamped(_ s: PaintSurface, world: simd_float3) -> CGPoint? {
-            guard var t = s.texturePoint(worldPoint: world) else { return nil }
-            let m = CGFloat(20)
-            let size = PaintSurface.sizeMeters * PaintCanvas.ppm
-            t.x = min(max(t.x, m), size - m)
-            t.y = min(max(t.y, m), size - m)
-            return t
-        }
-
-        /// insert a new vertex into the edge closest to the tapped point
-        private func insertVertex(into s: PaintSurface, at p: CGPoint) -> Int {
-            guard s.polygon.count >= 3 else { s.polygon.append(p); return s.polygon.count - 1 }
-            var bestEdge = 0
-            var bestD = CGFloat.greatestFiniteMagnitude
-            for i in 0..<s.polygon.count {
-                let a = s.polygon[i], b = s.polygon[(i + 1) % s.polygon.count]
-                let abx = b.x - a.x, aby = b.y - a.y
-                let len2 = max(1, abx * abx + aby * aby)
-                let t = min(1, max(0, ((p.x - a.x) * abx + (p.y - a.y) * aby) / len2))
-                let qx = a.x + abx * t, qy = a.y + aby * t
-                let dd = hypot(p.x - qx, p.y - qy)
-                if dd < bestD { bestD = dd; bestEdge = i }
-            }
-            s.polygon.insert(p, at: bestEdge + 1)
-            return bestEdge + 1
         }
 
         // MARK: PNG export — full resolution, transparent background
 
         private func exportPNG() {
-            var surface: PaintSurface?
-            if let id = lastHitSurfaceID { surface = surfaces[id] }
-            if surface?.engine == nil {
-                surface = surfaces.values.first(where: { $0.engine != nil })
-            }
-            guard let s = surface, let canvas = s.exportCanvas() else {
+            guard let w = wall, let canvas = w.exportCanvas() else {
                 state.showToast("Nothing painted yet")
                 return
             }
@@ -495,158 +483,47 @@ struct ARSprayView: UIViewRepresentable {
     }
 }
 
-// MARK: - PaintSurface: one detected wall
+// MARK: - PaintSurface: THE wall — one frozen plane with a lasso-editable mask
 
-/// 3 m × 3 m surface whose paint lives in lazy 0.5 m tiles (4096 px/m).
 final class PaintSurface {
-    static let sizeMeters: CGFloat = 3.0
+    static let sizeMeters: CGFloat = 12.0        // huge canvas, tiles stay lazy
 
-    let id: UUID
-    let node: SCNNode                      // paint root, rotated into the wall
+    let rootNode = SCNNode()                     // world-placed
+    let node = SCNNode()                         // paint root, rotated into the wall
     private(set) var engine: SprayEngine?
     private var canvas: PaintCanvas?
     private(set) var anchorTransform: simd_float4x4
+    let followsAnchor: UUID?
     private let dripDirLocal: CGVector
+    var canvasPx: CGFloat { PaintSurface.sizeMeters * PaintCanvas.ppm }
 
-    init(id: UUID, transform: simd_float4x4) {
-        self.id = id
+    // paintable-area mask: 5 cm cells over the whole canvas
+    private let maskN = 240
+    private var mask: [Bool]
+    private var maskAny = false
+    private var cellPx: CGFloat { canvasPx / CGFloat(maskN) }
+
+    // lasso editor visualisation
+    private var vizCtx: CGContext?
+    private var vizMaterial: SCNMaterial?
+    private var vizNode: SCNNode?
+    private let vizPx = 480                      // 2 px per mask cell
+
+    init(transform: simd_float4x4, followsAnchor: UUID?) {
         anchorTransform = transform
-        node = SCNNode()
+        self.followsAnchor = followsAnchor
+        rootNode.simdTransform = transform
         node.eulerAngles.x = -.pi / 2
+        rootNode.addChildNode(node)
+        mask = .init(repeating: false, count: maskN * maskN)
 
         let downLocal = transform.inverse * simd_float4(0, -1, 0, 0)
         dripDirLocal = CGVector(dx: CGFloat(downLocal.x), dy: CGFloat(downLocal.z))
     }
 
-    /// Intersect a world-space ray with this surface's plane (nil if it misses
-    /// the plane or lands outside the 3 m canvas).
-    func rayHit(origin: simd_float3, dir: simd_float3) -> Float? {
-        let col = anchorTransform.columns.1
-        let n = simd_normalize(simd_float3(col.x, col.y, col.z))
-        let denom = simd_dot(dir, n)
-        guard abs(denom) > 1e-4 else { return nil }
-        let p0 = anchorTransform.position
-        let t = simd_dot(p0 - origin, n) / denom
-        guard t > 0.02 else { return nil }
-        guard texturePoint(worldPoint: origin + dir * t) != nil else { return nil }
-        return t
-    }
-
-    /// The camera's right-axis projected onto the wall — the CHISEL cap's
-    /// line direction, so rotating the phone visibly rotates the stroke.
-    func rollDirection(cameraRight: simd_float3) -> CGVector {
-        let col = anchorTransform.columns.1
-        let n = simd_normalize(simd_float3(col.x, col.y, col.z))
-        var t = cameraRight - n * simd_dot(cameraRight, n)
-        let len = simd_length(t)
-        guard len > 1e-4 else { return CGVector(dx: 1, dy: 0) }
-        t /= len
-        let local = anchorTransform.inverse * vec4(t, 0)
-        let l = hypot(CGFloat(local.x), CGFloat(local.z))
-        guard l > 1e-4 else { return CGVector(dx: 1, dy: 0) }
-        return CGVector(dx: CGFloat(local.x) / l, dy: CGFloat(local.z) / l)
-    }
-
-    func updateTransform(_ t: simd_float4x4) { anchorTransform = t }
-
-    // MARK: editable paint boundary (polygon in surface-px)
-
-    var polygon: [CGPoint] = []                 // empty = whole canvas paintable
-    var detectedBoundary: [CGPoint] = []        // from ARKit's scanned plane shape
-    private var editorNode: SCNNode?
-
-    func captureBoundary(_ plane: ARPlaneAnchor) {
-        let verts = plane.geometry.boundaryVertices
-        guard verts.count >= 3 else { return }
-        let stride = max(1, verts.count / 10)
-        let half = Float(PaintSurface.sizeMeters / 2)
-        let ppm = CGFloat(PaintCanvas.ppm)
-        var pts: [CGPoint] = []
-        var i = 0
-        while i < verts.count {
-            let v = verts[i]
-            let x = min(max(v.x, -half + 0.02), half - 0.02)
-            let z = min(max(v.z, -half + 0.02), half - 0.02)
-            pts.append(CGPoint(x: CGFloat(x + half) * ppm / 1,
-                               y: CGFloat(z + half) * ppm / 1))
-            i += stride
-        }
-        if pts.count >= 3 { detectedBoundary = pts }
-    }
-
-    func contains(_ p: CGPoint) -> Bool {
-        guard polygon.count >= 3 else { return true }
-        var inside = false
-        var j = polygon.count - 1
-        for i in 0..<polygon.count {
-            let a = polygon[i], b = polygon[j]
-            if (a.y > p.y) != (b.y > p.y),
-               p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x {
-                inside.toggle()
-            }
-            j = i
-        }
-        return inside
-    }
-
-    /// surface-px → world position on the plane
-    func worldPoint(tex: CGPoint) -> simd_float3 {
-        let half = Float(PaintSurface.sizeMeters / 2)
-        let ppm = Float(PaintCanvas.ppm)
-        let lx = Float(tex.x) / ppm - half
-        let lz = Float(tex.y) / ppm - half
-        let w = anchorTransform * simd_float4(lx, 0, lz, 1)
-        return simd_float3(w.x, w.y, w.z)
-    }
-
-    private func localXY(_ p: CGPoint) -> CGPoint {
-        let half = PaintSurface.sizeMeters / 2
-        let ppm = PaintCanvas.ppm
-        return CGPoint(x: p.x / ppm - half, y: half - p.y / ppm)
-    }
-
-    func rebuildEditor() {
-        editorNode?.removeFromParentNode()
-        editorNode = nil
-        guard polygon.count >= 3 else { return }
-        let root = SCNNode()
-        // translucent pane matching the polygon shape
-        let path = UIBezierPath()
-        for (i, p) in polygon.enumerated() {
-            let l = localXY(p)
-            if i == 0 { path.move(to: l) } else { path.addLine(to: l) }
-        }
-        path.close()
-        let shape = SCNShape(path: path, extrusionDepth: 0)
-        let m = SCNMaterial()
-        m.diffuse.contents = UIColor(red: 0.35, green: 1.0, blue: 0.45, alpha: 0.14)
-        m.lightingModel = .constant
-        m.isDoubleSided = true
-        m.writesToDepthBuffer = false
-        shape.materials = [m]
-        let shapeNode = SCNNode(geometry: shape)
-        shapeNode.position.z = 0.002
-        root.addChildNode(shapeNode)
-        // draggable vertex dots
-        for p in polygon {
-            let s = SCNSphere(radius: 0.016)
-            let dm = SCNMaterial()
-            dm.diffuse.contents = UIColor.white
-            dm.emission.contents = UIColor.orange
-            dm.lightingModel = .constant
-            s.materials = [dm]
-            let n = SCNNode(geometry: s)
-            let l = localXY(p)
-            n.position = SCNVector3(Float(l.x), Float(l.y), 0.004)
-            root.addChildNode(n)
-        }
-        node.addChildNode(root)
-        editorNode = root
-    }
-
-    func hideEditor() {
-        editorNode?.removeFromParentNode()
-        editorNode = nil
+    func updateTransform(_ t: simd_float4x4) {
+        anchorTransform = t
+        rootNode.simdTransform = t
     }
 
     func allocateEngine(device: MTLDevice, budget: TileBudget, onBudgetExceeded: @escaping () -> Void) {
@@ -662,11 +539,13 @@ final class PaintSurface {
         canvas?.teardown()
         canvas = nil
         engine = nil
+        rootNode.removeFromParentNode()
     }
 
     func exportCanvas() -> PaintCanvas? { canvas }
 
-    /// anchor-local hit → surface pixel (nil if outside the canvas)
+    // MARK: geometry
+
     func texturePoint(worldPoint: simd_float3) -> CGPoint? {
         let local = anchorTransform.inverse * vec4(worldPoint, 1)
         let half = Float(PaintSurface.sizeMeters / 2)
@@ -676,7 +555,28 @@ final class PaintSurface {
                        y: CGFloat((local.z + half) * ppm))
     }
 
-    /// How obliquely the spray hits: (elongation factor, direction on texture)
+    /// like texturePoint but clamps to the canvas instead of failing
+    func texturePointClamped(worldPoint: simd_float3) -> CGPoint? {
+        let local = anchorTransform.inverse * vec4(worldPoint, 1)
+        let half = Float(PaintSurface.sizeMeters / 2)
+        let ppm = Float(PaintCanvas.ppm)
+        let x = min(max(local.x, -half + 0.01), half - 0.01)
+        let z = min(max(local.z, -half + 0.01), half - 0.01)
+        return CGPoint(x: CGFloat((x + half) * ppm), y: CGFloat((z + half) * ppm))
+    }
+
+    func rayHit(origin: simd_float3, dir: simd_float3) -> Float? {
+        let col = anchorTransform.columns.1
+        let n = simd_normalize(simd_float3(col.x, col.y, col.z))
+        let denom = simd_dot(dir, n)
+        guard abs(denom) > 1e-4 else { return nil }
+        let p0 = anchorTransform.position
+        let t = simd_dot(p0 - origin, n) / denom
+        guard t > 0.02 else { return nil }
+        guard texturePoint(worldPoint: origin + dir * t) != nil else { return nil }
+        return t
+    }
+
     func obliqueness(rayDir: simd_float3) -> (CGFloat, CGVector) {
         let col = anchorTransform.columns.1
         let n = simd_normalize(simd_float3(col.x, col.y, col.z))
@@ -694,6 +594,154 @@ final class PaintSurface {
             }
         }
         return (stretch, dir)
+    }
+
+    func rollDirection(cameraRight: simd_float3) -> CGVector {
+        let col = anchorTransform.columns.1
+        let n = simd_normalize(simd_float3(col.x, col.y, col.z))
+        var t = cameraRight - n * simd_dot(cameraRight, n)
+        let len = simd_length(t)
+        guard len > 1e-4 else { return CGVector(dx: 1, dy: 0) }
+        t /= len
+        let local = anchorTransform.inverse * vec4(t, 0)
+        let l = hypot(CGFloat(local.x), CGFloat(local.z))
+        guard l > 1e-4 else { return CGVector(dx: 1, dy: 0) }
+        return CGVector(dx: CGFloat(local.x) / l, dy: CGFloat(local.z) / l)
+    }
+
+    static func boundaryTexPoints(of plane: ARPlaneAnchor) -> [CGPoint] {
+        let verts = plane.geometry.boundaryVertices
+        guard verts.count >= 3 else { return [] }
+        let step = max(1, verts.count / 12)
+        let half = Float(sizeMeters / 2)
+        let ppm = CGFloat(PaintCanvas.ppm)
+        var pts: [CGPoint] = []
+        var i = 0
+        while i < verts.count {
+            let v = verts[i]
+            let x = min(max(v.x, -half + 0.02), half - 0.02)
+            let z = min(max(v.z, -half + 0.02), half - 0.02)
+            pts.append(CGPoint(x: CGFloat(x + half) * ppm, y: CGFloat(z + half) * ppm))
+            i += step
+        }
+        return pts.count >= 3 ? pts : []
+    }
+
+    // MARK: paintable-area mask
+
+    var maskIsEmpty: Bool { !maskAny }
+
+    func contains(_ p: CGPoint) -> Bool {
+        let cx = Int(p.x / cellPx), cy = Int(p.y / cellPx)
+        guard cx >= 0, cy >= 0, cx < maskN, cy < maskN else { return false }
+        return mask[cy * maskN + cx]
+    }
+
+    func seedSquare(center: CGPoint, halfMeters: CGFloat) {
+        let h = halfMeters * PaintCanvas.ppm
+        applyLasso([CGPoint(x: center.x - h, y: center.y - h),
+                    CGPoint(x: center.x + h, y: center.y - h),
+                    CGPoint(x: center.x + h, y: center.y + h),
+                    CGPoint(x: center.x - h, y: center.y + h)], add: true)
+    }
+
+    /// Photoshop-style lasso: rasterises the closed stroke into the mask.
+    func applyLasso(_ texPts: [CGPoint], add: Bool) {
+        guard texPts.count >= 3 else { return }
+        let poly = texPts.map { CGPoint(x: $0.x / cellPx, y: $0.y / cellPx) }
+        for cy in 0..<maskN {
+            let yc = CGFloat(cy) + 0.5
+            var xs: [CGFloat] = []
+            var j = poly.count - 1
+            for i in 0..<poly.count {
+                let a = poly[i], b = poly[j]
+                if (a.y > yc) != (b.y > yc) {
+                    xs.append(a.x + (yc - a.y) / (b.y - a.y) * (b.x - a.x))
+                }
+                j = i
+            }
+            xs.sort()
+            var k = 0
+            while k + 1 < xs.count {
+                let x0 = max(0, Int(xs[k].rounded(.down)))
+                let x1 = min(maskN - 1, Int(xs[k + 1].rounded(.up)))
+                if x0 <= x1 {
+                    for cx in x0...x1 { mask[cy * maskN + cx] = add }
+                }
+                k += 2
+            }
+        }
+        maskAny = mask.contains(true)
+        redrawViz(stroke: nil, add: add)
+    }
+
+    // MARK: lasso editor visuals
+
+    func showEditor() {
+        if vizNode == nil {
+            let cs = CGColorSpaceCreateDeviceRGB()
+            vizCtx = CGContext(data: nil, width: vizPx, height: vizPx,
+                               bitsPerComponent: 8, bytesPerRow: 0, space: cs,
+                               bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            vizCtx?.translateBy(x: 0, y: CGFloat(vizPx))
+            vizCtx?.scaleBy(x: 1, y: -1)
+            let m = SCNMaterial()
+            m.lightingModel = .constant
+            m.isDoubleSided = true
+            m.transparencyMode = .aOne
+            m.writesToDepthBuffer = false
+            let geo = SCNPlane(width: PaintSurface.sizeMeters, height: PaintSurface.sizeMeters)
+            geo.materials = [m]
+            let n = SCNNode(geometry: geo)
+            n.position.z = 0.003
+            vizMaterial = m
+            vizNode = n
+        }
+        if let n = vizNode, n.parent == nil { node.addChildNode(n) }
+        redrawViz(stroke: nil, add: true)
+    }
+
+    func hideEditor() {
+        vizNode?.removeFromParentNode()
+    }
+
+    func previewLasso(_ texPts: [CGPoint], add: Bool) {
+        redrawViz(stroke: texPts, add: add)
+    }
+
+    private func redrawViz(stroke: [CGPoint]?, add: Bool) {
+        guard let ctx = vizCtx, vizNode?.parent != nil else { return }
+        ctx.clear(CGRect(x: 0, y: 0, width: vizPx, height: vizPx))
+        // mask as translucent green runs
+        ctx.setFillColor(UIColor(red: 0.35, green: 1.0, blue: 0.45, alpha: 0.18).cgColor)
+        let s = CGFloat(vizPx) / CGFloat(maskN)
+        for cy in 0..<maskN {
+            var cx = 0
+            while cx < maskN {
+                if mask[cy * maskN + cx] {
+                    var end = cx
+                    while end + 1 < maskN, mask[cy * maskN + end + 1] { end += 1 }
+                    ctx.fill(CGRect(x: CGFloat(cx) * s, y: CGFloat(cy) * s,
+                                    width: CGFloat(end - cx + 1) * s, height: s))
+                    cx = end + 1
+                } else { cx += 1 }
+            }
+        }
+        // the live lasso stroke: white when adding, red when cutting
+        if let stroke = stroke, stroke.count >= 2 {
+            ctx.setStrokeColor((add ? UIColor.white : UIColor.systemRed).cgColor)
+            ctx.setLineWidth(2.5)
+            ctx.setLineCap(.round)
+            let scale = CGFloat(vizPx) / canvasPx
+            ctx.move(to: CGPoint(x: stroke[0].x * scale, y: stroke[0].y * scale))
+            for p in stroke.dropFirst() {
+                ctx.addLine(to: CGPoint(x: p.x * scale, y: p.y * scale))
+            }
+            ctx.strokePath()
+        }
+        if let img = ctx.makeImage() {
+            vizMaterial?.diffuse.contents = img
+        }
     }
 }
 

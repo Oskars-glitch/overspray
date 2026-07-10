@@ -45,7 +45,7 @@ struct ContentView: View {
                     }
                     Spacer()
                     Button(action: { state.editToggleRequested = true }) {
-                        Image(systemName: "square.dashed")
+                        Image(systemName: "lasso")
                             .font(.system(size: 15, weight: .semibold))
                             .foregroundColor(state.editingPlane ? .orange : .white)
                             .frame(width: 38, height: 38)
@@ -124,6 +124,23 @@ struct ContentView: View {
                 .padding(.bottom, 8)
             }
             .padding(.top, 8)
+
+            // the one deliberate designation: aim at your wall, tap SET WALL
+            if !state.wallSet, !state.drawingShape {
+                VStack {
+                    Spacer()
+                    Button(action: { state.setWallRequested = true }) {
+                        Text("SET WALL")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundColor(state.aimedAtWall ? .black : .white.opacity(0.6))
+                            .padding(.horizontal, 28).padding(.vertical, 14)
+                            .background(state.aimedAtWall ? AnyShapeStyle(Color.white)
+                                                          : AnyShapeStyle(.ultraThinMaterial),
+                                        in: Capsule())
+                    }
+                    .padding(.bottom, 170)
+                }
+            }
 
             if state.pickingColorIndex != nil, state.pickPoint != .zero {
                 ZStack {
