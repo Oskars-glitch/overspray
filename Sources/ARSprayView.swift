@@ -170,10 +170,9 @@ struct ARSprayView: UIViewRepresentable {
 
             var hit: (surface: PaintSurface, tex: CGPoint, dist: Double,
                       stretch: CGFloat, sdir: CGVector, roll: CGVector)?
-            var onDetectedPlane = false
 
-            // 1 · PREFER a real detected plane (tight, consistent, glued to the
-            //     wall — the reliable behaviour). Match it to its surface.
+            // ONLY a real detected plane counts — tight, consistent, glued to
+            // the wall. One correct wall, exactly like the reliable behaviour.
             if let query = view.raycastQuery(from: viewCenter,
                                              allowing: .existingPlaneGeometry,
                                              alignment: .vertical),
@@ -186,26 +185,6 @@ struct ARSprayView: UIViewRepresentable {
                     let (stretch, sdir) = surface.obliqueness(rayDir: camFwd)
                     hit = (surface, tex, dist, stretch, sdir,
                            surface.rollDirection(cameraRight: camRight))
-                    onDetectedPlane = true
-                }
-            }
-
-            // 2 · otherwise fall back to our own surfaces (incl. freestyle patches)
-            if hit == nil {
-                var bestT = Float.greatestFiniteMagnitude
-                var bestSurface: PaintSurface?
-                for s in surfaces.values {
-                    if let t = s.rayHit(origin: camPos, dir: camFwd), t < bestT {
-                        bestT = t; bestSurface = s
-                    }
-                }
-                if let surface = bestSurface, bestT < 8 {
-                    let world = camPos + camFwd * bestT
-                    if let tex = surface.texturePoint(worldPoint: world) {
-                        let (stretch, sdir) = surface.obliqueness(rayDir: camFwd)
-                        hit = (surface, tex, Double(bestT), stretch, sdir,
-                               surface.rollDirection(cameraRight: camRight))
-                    }
                 }
             }
 
@@ -257,33 +236,6 @@ struct ARSprayView: UIViewRepresentable {
                     DispatchQueue.main.async { SoundKit.shared.setSprayMuted(false) }
                 }
                 sprayPrev = nil
-                // Only when there is NO surface here at all do we plant a
-                // freestyle patch (uneven facades). Detected walls always win,
-                // so painting stays glued to the real wall.
-                if spraying, capReady, lastTime - lastPatchSpawn > 0.7 {
-                    let query = view.raycastQuery(from: viewCenter,
-                                                  allowing: .estimatedPlane,
-                                                  alignment: .any)
-                    if let est = query.flatMap({ view.session.raycast($0).first }) {
-                        let world = est.worldTransform.position
-                        let d = simd_length(world - camPos)
-                        // reject if any existing surface is close to this point
-                        var nearExisting = false
-                        for s in surfaces.values {
-                            if let t = s.rayHit(origin: camPos, dir: camFwd),
-                               abs(t - d) < 0.25 { nearExisting = true; break }
-                        }
-                        if d > 0.15, d < 4, !nearExisting {
-                            lastPatchSpawn = lastTime
-                            view.session.add(anchor: ARAnchor(name: "patch",
-                                                              transform: est.worldTransform))
-                            if !patchToastShown {
-                                patchToastShown = true
-                                state.showToast("Freestyle surface — no wall detected here")
-                            }
-                        }
-                    }
-                }
             }
 
             // live color picking: long-press a swatch, drag over the camera view

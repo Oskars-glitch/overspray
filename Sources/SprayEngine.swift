@@ -10,7 +10,6 @@ final class CanPhysics {
     private(set) var pressure: Double = 1.0
     private(set) var charge: Double = 0
     var dashOn = true
-    private var dashDist: Double = 0
 
     func tick(spraying: Bool, dt: Double) {
         if spraying {
@@ -26,8 +25,19 @@ final class CanPhysics {
         charge = min(3.0, charge + (strong ? 0.8 : 0.35))
     }
 
-    func dashReset() { dashDist = 0; dashOn = true }
-    func dashAdvance(_ metres: Double) -> Double { dashDist += metres; return dashDist }
+    func dashReset() { dashClock = 0; dashOn = true }
+    private var dashClock: Double = 0
+
+    /// Dotted-line attachment chops at a FIXED frequency like a motor:
+    /// .1 = 1/12 s cycle · .2 = 1/6 s cycle (half on, half off).
+    /// Time-based, so it pulses steadily no matter how fast the hand moves.
+    func dashTick(dt: Double, mode: Int) -> Bool {
+        guard mode > 0 else { dashOn = true; return true }
+        dashClock += dt
+        let cycle = mode == 1 ? 1.0 / 12.0 : 1.0 / 6.0
+        dashOn = dashClock.truncatingRemainder(dividingBy: cycle) < cycle * 0.5
+        return dashOn
+    }
 }
 
 /// Spray physics. Draws through a PaintCanvas (tiled, GPU-backed).
@@ -101,17 +111,10 @@ final class SprayEngine {
         let stamps = max(1, min(cap.chisel ? 40 : 28, Int(ceil(Double(pathLen) / spacing))))
         let pressure = CGFloat(0.5 + 0.5 * CanPhysics.shared.pressure)
         let charge = CGFloat(CanPhysics.shared.charge)
-        let stepM = Double(pathLen / ppm) / Double(stamps)
-        // dotted-line attachment: on/off measured in real wall distance
-        let dash: (on: Double, cycle: Double)? =
-            dashMode == 0 ? nil : (0.04, dashMode == 1 ? 0.085 : 0.14)
+        // robotised dotted line: fixed-frequency time chopping
+        guard CanPhysics.shared.dashTick(dt: dt, mode: dashMode) else { return }
 
         for s in 1...stamps {
-            let phase = CanPhysics.shared.dashAdvance(stepM)
-            var on = true
-            if let dl = dash { on = phase.truncatingRemainder(dividingBy: dl.cycle) < dl.on }
-            CanPhysics.shared.dashOn = on
-            guard on else { continue }
             let f = CGFloat(s) / CGFloat(stamps)
             let p = CGPoint(x: from.x + (to.x - from.x) * f,
                             y: from.y + (to.y - from.y) * f)
@@ -121,7 +124,6 @@ final class SprayEngine {
                   budgetShare: max(1, stamps), cap: cap,
                   pressure: pressure, charge: charge, boost: boost, shape: shape)
         }
-        if dashMode == 0 { CanPhysics.shared.dashOn = true }
     }
 
     private func stamp(at c: CGPoint, d: CGFloat, k: CGFloat, R: CGFloat,
