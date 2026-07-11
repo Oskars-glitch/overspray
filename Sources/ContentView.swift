@@ -13,6 +13,11 @@ struct ContentView: View {
                     .ignoresSafeArea()
             }
 
+            if !state.wallSet, !state.drawingShape {
+                SetPointLayer(state: state)
+                    .ignoresSafeArea()
+            }
+
             // crosshair
             if state.aimedAtWall {
                 Circle()
@@ -125,20 +130,57 @@ struct ContentView: View {
             }
             .padding(.top, 8)
 
-            // the one deliberate designation: aim at your wall, tap SET WALL
+            // designate the wall: tap the flat spots, then SET WALL
             if !state.wallSet, !state.drawingShape {
                 VStack {
                     Spacer()
-                    Button(action: { state.setWallRequested = true }) {
-                        Text("SET WALL")
-                            .font(.system(size: 16, weight: .bold))
-                            .foregroundColor(state.aimedAtWall ? .black : .white.opacity(0.6))
-                            .padding(.horizontal, 28).padding(.vertical, 14)
-                            .background(state.aimedAtWall ? AnyShapeStyle(Color.white)
-                                                          : AnyShapeStyle(.ultraThinMaterial),
-                                        in: Capsule())
+                    VStack(spacing: 10) {
+                        Text(state.setPointCount > 0
+                             ? "\(state.setPointCount) point\(state.setPointCount == 1 ? "" : "s") — tap more flat spots or SET"
+                             : "Tap the FLAT spots of your wall")
+                            .font(.footnote.weight(.medium))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 14).padding(.vertical, 8)
+                            .background(.ultraThinMaterial, in: Capsule())
+                        HStack(spacing: 10) {
+                            if state.setPointCount > 0 {
+                                Button("Reset") { state.resetPointsRequested = true }
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundColor(.white)
+                                    .padding(.horizontal, 18).padding(.vertical, 14)
+                                    .background(.ultraThinMaterial, in: Capsule())
+                            }
+                            Button(action: { state.setWallRequested = true }) {
+                                Text("SET WALL")
+                                    .font(.system(size: 16, weight: .bold))
+                                    .foregroundColor(state.aimedAtWall || state.setPointCount > 0
+                                                     ? .black : .white.opacity(0.6))
+                                    .padding(.horizontal, 28).padding(.vertical, 14)
+                                    .background(state.aimedAtWall || state.setPointCount > 0
+                                                ? AnyShapeStyle(Color.white)
+                                                : AnyShapeStyle(.ultraThinMaterial),
+                                                in: Capsule())
+                            }
+                        }
                     }
                     .padding(.bottom, 170)
+                }
+            }
+
+            // depth nudge while lasso-editing: slide the wall closer / away
+            if state.editingPlane {
+                VStack {
+                    Spacer()
+                    VStack(spacing: 6) {
+                        Text(String(format: "Wall depth  %+d mm", Int(state.wallNudge * 1000)))
+                            .font(.footnote.weight(.semibold))
+                            .foregroundColor(.white)
+                        Slider(value: $state.wallNudge, in: -0.10...0.10)
+                    }
+                    .padding(14)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+                    .padding(.horizontal, 44)
+                    .padding(.bottom, 150)
                 }
             }
 
@@ -243,6 +285,15 @@ struct ShapeDrawOverlay: View {
                         }
                     }
                     .stroke(Color.white, style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round))
+                    if strokes.isEmpty, current.isEmpty, !state.customShape.isEmpty {
+                        ForEach(state.customShape.indices, id: \.self) { i in
+                            let p = state.customShape[i]
+                            Circle().fill(Color.white.opacity(0.8))
+                                .frame(width: 4, height: 4)
+                                .position(x: panel / 2 + p.x * panel * 0.42,
+                                          y: panel / 2 + p.y * panel * 0.42)
+                        }
+                    }
                 }
                 .frame(width: panel, height: panel)
                 .contentShape(Rectangle())
@@ -258,6 +309,13 @@ struct ShapeDrawOverlay: View {
                             current = []
                         }
                 )
+                VStack(spacing: 6) {
+                    CapSlider(label: "Scatter", value: $state.customScatter, range: 0...1)
+                    CapSlider(label: "Spray size", value: $state.customScale, range: 0.4...2.5)
+                    CapSlider(label: "Dot size", value: $state.customDotSize, range: 0.1...1.5)
+                    CapSlider(label: "Dot amount", value: $state.customCount, range: 0.3...3)
+                }
+                .frame(width: panel)
                 HStack(spacing: 12) {
                     Button("Clear") { strokes = []; current = [] }
                         .font(.callout.weight(.semibold))
@@ -279,7 +337,15 @@ struct ShapeDrawOverlay: View {
 
     private func commit() {
         let all = strokes.flatMap { $0 }
-        guard all.count >= 2 else { state.drawingShape = false; return }
+        guard all.count >= 2 else {
+            // nothing new drawn: keep the existing shape, sliders apply live
+            state.drawingShape = false
+            if !state.customShape.isEmpty,
+               let idx = PaintState.nozzles.firstIndex(where: { $0.custom }) {
+                state.nozzleIndex = idx
+            }
+            return
+        }
         var cx: CGFloat = 0, cy: CGFloat = 0
         for p in all { cx += p.x; cy += p.y }
         cx /= CGFloat(all.count); cy /= CGFloat(all.count)
@@ -298,6 +364,41 @@ struct ShapeDrawOverlay: View {
             state.nozzleIndex = idx
         }
         state.showToast("Custom cap ready")
+    }
+}
+
+/// One labelled tuning slider inside the custom-cap panel.
+struct CapSlider: View {
+    let label: String
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(label)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(.white)
+                .frame(width: 84, alignment: .leading)
+            Slider(value: $value, in: range)
+        }
+    }
+}
+
+/// Taps place wall points while no wall is set (small movement = a tap).
+struct SetPointLayer: View {
+    @ObservedObject var state: PaintState
+
+    var body: some View {
+        Color.clear
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                    .onEnded { v in
+                        if hypot(v.translation.width, v.translation.height) < 14 {
+                            state.setPointTouch = v.location
+                        }
+                    }
+            )
     }
 }
 

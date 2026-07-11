@@ -177,8 +177,9 @@ final class SprayEngine {
                     let t = shape[Int(rnd() * CGFloat(shape.count)) % shape.count]
                     var qx = -roll.dy, qy = roll.dx
                     if qx * dripDir.dx + qy * dripDir.dy < 0 { qx = -qx; qy = -qy }
-                    let offx = roll.dx * (t.x * R) + qx * (t.y * R) + gaussRnd() * R * 0.05
-                    let offy = roll.dy * (t.x * R) + qy * (t.y * R) + gaussRnd() * R * 0.05
+                    let jit = R * (0.02 + cap.scatterScale * 0.30)
+                    let offx = roll.dx * (t.x * R) + qx * (t.y * R) + gaussRnd() * jit
+                    let offy = roll.dy * (t.x * R) + qy * (t.y * R) + gaussRnd() * jit
                     p = placeWorld(offx, offy)
                 } else if cap.chisel {
                     let u = gaussRnd() * R
@@ -285,27 +286,31 @@ final class SprayEngine {
                     }
                     let bonus = 1 + 0.3 * CGFloat(min(6, Int(dripCount[idx])))
                     let vol = min(2.4, (0.3 + CGFloat(Double(nv) - 1) * 1.6 + rnd() * 0.6) * bonus)
+                    let fine = cap.dotScale < 0.3
+                    let sx = fine ? c.x : cx, sy = fine ? c.y : cy
+                    let jit: CGFloat = fine ? 0.0005 : 0.003
                     if nearCount > 0 {
                         if rnd() < 0.10, let ni = near {
                             let extra = vol * (0.005 + rnd() * 0.012) * ppm
                             drips[ni].budget = min(0.18 * ppm, drips[ni].budget + extra)
                             drips[ni].vol = min(3.0, drips[ni].vol + 0.10)
                         } else if nearCount < localMax, rnd() < 0.05, drips.count < 60 {
-                            spawnDrip(x: cx, y: cy, vol: vol, color: color)
+                            spawnDrip(x: sx, y: sy, vol: vol, color: color, jitterM: jit)
                         }
                     } else if drips.count < 60 {
                         dripCount[idx] = UInt8(min(250, Int(dripCount[idx]) + 1))
-                        spawnDrip(x: cx, y: cy, vol: vol, color: color)
+                        spawnDrip(x: sx, y: sy, vol: vol, color: color, jitterM: jit)
                     }
                 }
             }
         }
     }
 
-    private func spawnDrip(x: CGFloat, y: CGFloat, vol: CGFloat, color: CGColor) {
+    private func spawnDrip(x: CGFloat, y: CGFloat, vol: CGFloat, color: CGColor,
+                           jitterM: CGFloat = 0.003) {
         drips.append(Drip(
             origin: CGPoint(x: x, y: y),
-            pos: CGPoint(x: x + gaussRnd() * 0.003 * ppm, y: y),
+            pos: CGPoint(x: x + gaussRnd() * jitterM * ppm, y: y),
             vol: vol,
             budget: vol * (0.008 + rnd() * 0.020) * ppm,
             width: max(2.0, (0.0012 + vol * 0.0011) * (0.75 + rnd() * 0.5) * ppm),

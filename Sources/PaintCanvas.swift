@@ -5,7 +5,7 @@ import UIKit
 /// Global cap on allocated paint tiles (memory care for older iPhones).
 final class TileBudget {
     var used = 0
-    let maxTiles = 10
+    let maxTiles = 14
     var warned = false
 }
 

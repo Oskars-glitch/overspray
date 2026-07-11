@@ -54,6 +54,11 @@ struct ARSprayView: UIViewRepresentable {
         // lasso editing
         private var lassoStroke: [CGPoint] = []      // texture px
         private var lassoAdd = true
+        // point-based wall setting
+        private var setPoints: [simd_float3] = []
+        private var setPointNodes: [SCNNode] = []
+        private var firstHitTransform: simd_float4x4?
+        private var lastNudge: Double = 0
         private var viewCenter = CGPoint(x: UIScreen.main.bounds.midX,
                                          y: UIScreen.main.bounds.midY)
         private let viewSize = UIScreen.main.bounds.size
@@ -158,6 +163,18 @@ struct ARSprayView: UIViewRepresentable {
                                                       camTransform.columns.0.y,
                                                       camTransform.columns.0.z))
 
+            if state.resetPointsRequested {
+                state.resetPointsRequested = false
+                clearSetPoints()
+            }
+            if let tp = state.setPointTouch {
+                state.setPointTouch = nil
+                if wall == nil { placeSetPoint(view: view, at: tp) }
+            }
+            if state.wallNudge != lastNudge {
+                lastNudge = state.wallNudge
+                wall?.setNudge(Float(state.wallNudge))
+            }
             if state.setWallRequested {
                 state.setWallRequested = false
                 setWall(view: view, camPos: camPos, camFwd: camFwd)
@@ -189,7 +206,18 @@ struct ARSprayView: UIViewRepresentable {
             }
 
             let spraying = (state.spraying || VolumeSpray.shared.holding) && !state.editingPlane
-            let cap = PaintState.nozzles[state.nozzleIndex]
+            var cap = PaintState.nozzles[state.nozzleIndex]
+            if cap.custom {
+                // the four sliders shape the drawn cap live
+                cap = SprayCap(name: cap.name,
+                               deg: cap.deg * max(0.3, state.customScale),
+                               dotScale: CGFloat(max(0.05, state.customDotSize)),
+                               countScale: CGFloat(max(0.1, state.customCount)),
+                               scatterScale: CGFloat(min(1.0, max(0.0, state.customScatter))),
+                               holeFrac: 0, chisel: false,
+                               dripMaxM: cap.dripMaxM, icon: cap.icon,
+                               dirty: false, custom: true)
+            }
             let shape = cap.custom ? state.customShape : []
             let capReady = !(cap.custom && shape.count < 2)
             CanPhysics.shared.tick(spraying: spraying && hit != nil, dt: dt)
@@ -241,6 +269,66 @@ struct ARSprayView: UIViewRepresentable {
             wall?.engine?.flush()
         }
 
+        // MARK: wall points — tap the FLAT spots; the wall passes through them
+
+        private func placeSetPoint(view: ARSCNView, at pt: CGPoint) {
+            var world: simd_float3?
+            var orient: simd_float4x4?
+            if let q = view.raycastQuery(from: pt, allowing: .existingPlaneGeometry,
+                                         alignment: .vertical),
+               let r = view.session.raycast(q).first {
+                world = r.worldTransform.position
+                orient = (r.anchor as? ARPlaneAnchor)?.transform ?? r.worldTransform
+            } else if let q = view.raycastQuery(from: pt, allowing: .estimatedPlane,
+                                                alignment: .any),
+                      let r = view.session.raycast(q).first {
+                world = r.worldTransform.position
+                orient = r.worldTransform
+            }
+            guard let w = world else {
+                state.showToast("No surface there — try another spot")
+                return
+            }
+            if firstHitTransform == nil { firstHitTransform = orient }
+            setPoints.append(w)
+            let sph = SCNSphere(radius: 0.011)
+            let m = SCNMaterial()
+            m.lightingModel = .constant
+            m.diffuse.contents = UIColor.white
+            m.emission.contents = UIColor.orange
+            sph.materials = [m]
+            let n = SCNNode(geometry: sph)
+            n.simdPosition = w
+            view.scene.rootNode.addChildNode(n)
+            setPointNodes.append(n)
+            DispatchQueue.main.async { self.state.setPointCount = self.setPoints.count }
+        }
+
+        private func clearSetPoints() {
+            setPoints = []
+            firstHitTransform = nil
+            for n in setPointNodes { n.removeFromParentNode() }
+            setPointNodes = []
+            DispatchQueue.main.async { self.state.setPointCount = 0 }
+        }
+
+        /// plane with the given normal through the given origin, facing the camera
+        private func planeTransform(normal nIn: simd_float3, origin: simd_float3,
+                                    towards cam: simd_float3) -> simd_float4x4 {
+            var n = simd_normalize(nIn)
+            if simd_dot(n, cam - origin) < 0 { n = -n }
+            var x = simd_cross(simd_float3(0, 1, 0), n)
+            if simd_length(x) < 1e-3 { x = simd_cross(simd_float3(1, 0, 0), n) }
+            x = simd_normalize(x)
+            let z = simd_cross(x, n)
+            var t = matrix_identity_float4x4
+            t.columns.0 = vec4(x, 0)
+            t.columns.1 = vec4(n, 0)
+            t.columns.2 = vec4(z, 0)
+            t.columns.3 = vec4(origin, 1)
+            return t
+        }
+
         // MARK: SET WALL — the one deliberate designation
 
         private func setWall(view: ARSCNView, camPos: simd_float3, camFwd: simd_float3) {
@@ -250,8 +338,19 @@ struct ARSprayView: UIViewRepresentable {
             var boundaryTex: [CGPoint] = []
             var hitWorld: simd_float3?
 
-            // best source: ARKit's detected plane (accurate depth + normal)
-            if let query = view.raycastQuery(from: viewCenter,
+            // YOUR points win: the plane passes through the average of the flat
+            // spots you tapped — protruding clutter can no longer pull it away
+            if setPoints.count >= 1, let src = firstHitTransform {
+                var c = simd_float3(0, 0, 0)
+                for p in setPoints { c += p }
+                c /= Float(setPoints.count)
+                let col = src.columns.1
+                transform = planeTransform(normal: simd_float3(col.x, col.y, col.z),
+                                           origin: c, towards: camPos)
+                hitWorld = c
+            }
+            // otherwise: ARKit's detected plane under the crosshair
+            else if let query = view.raycastQuery(from: viewCenter,
                                              allowing: .existingPlaneGeometry,
                                              alignment: .vertical),
                let result = view.session.raycast(query).first,
@@ -284,9 +383,12 @@ struct ARSprayView: UIViewRepresentable {
             }
             wall = w
             sprayPrev = nil
+            clearSetPoints()
+            lastNudge = 0
             arView?.debugOptions = []
             DispatchQueue.main.async {
                 self.state.wallSet = true
+                self.state.wallNudge = 0
                 self.state.status = "Wall set — spray away · lasso to reshape"
             }
         }
@@ -343,7 +445,7 @@ struct ARSprayView: UIViewRepresentable {
             if let e = surface.engine { return e }
             guard let device = device else { return nil }
             surface.allocateEngine(device: device, budget: tileBudget) { [weak self] in
-                self?.state.showToast("Paint area limit reached — Clear to continue")
+                self?.state.showToast("Painted-area limit (~3.5 m²) — Clear frees it")
             }
             return surface.engine
         }
@@ -397,6 +499,9 @@ struct ARSprayView: UIViewRepresentable {
             sprayPrev = nil
             lassoStroke = []
             planeSeen = false
+            clearSetPoints()
+            lastNudge = 0
+            DispatchQueue.main.async { self.state.wallNudge = 0 }
             runSession(reset: true)
             arView?.debugOptions = [.showFeaturePoints]
             state.wallSet = false
@@ -493,12 +598,14 @@ final class PaintSurface {
     private(set) var engine: SprayEngine?
     private var canvas: PaintCanvas?
     private(set) var anchorTransform: simd_float4x4
+    private var baseTransform: simd_float4x4
+    private(set) var nudge: Float = 0
     let followsAnchor: UUID?
     private let dripDirLocal: CGVector
     var canvasPx: CGFloat { PaintSurface.sizeMeters * PaintCanvas.ppm }
 
     // paintable-area mask: 5 cm cells over the whole canvas
-    private let maskN = 240
+    private let maskN = 600                      // 2 cm cells — smoother edges
     private var mask: [Bool]
     private var maskAny = false
     private var cellPx: CGFloat { canvasPx / CGFloat(maskN) }
@@ -507,10 +614,11 @@ final class PaintSurface {
     private var vizCtx: CGContext?
     private var vizMaterial: SCNMaterial?
     private var vizNode: SCNNode?
-    private let vizPx = 480                      // 2 px per mask cell
+    private let vizPx = 600                      // 1 px per mask cell
 
     init(transform: simd_float4x4, followsAnchor: UUID?) {
         anchorTransform = transform
+        baseTransform = transform
         self.followsAnchor = followsAnchor
         rootNode.simdTransform = transform
         node.eulerAngles.x = -.pi / 2
@@ -522,6 +630,23 @@ final class PaintSurface {
     }
 
     func updateTransform(_ t: simd_float4x4) {
+        baseTransform = t
+        applyNudge()
+    }
+
+    /// depth adjustment along the wall's normal (the edit-mode slider)
+    func setNudge(_ n: Float) {
+        nudge = n
+        applyNudge()
+    }
+
+    private func applyNudge() {
+        var t = baseTransform
+        let col = t.columns.1
+        let n3 = simd_normalize(simd_float3(col.x, col.y, col.z))
+        let o = t.columns.3
+        t.columns.3 = simd_float4(o.x + n3.x * nudge, o.y + n3.y * nudge,
+                                  o.z + n3.z * nudge, 1)
         anchorTransform = t
         rootNode.simdTransform = t
     }

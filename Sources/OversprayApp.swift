@@ -46,17 +46,24 @@ final class PaintState: ObservableObject {
     @Published var pickPreview: UIColor = .gray
 
     // feedback
-    @Published var status = "Scan slowly · then aim at the wall and tap SET WALL"
+    @Published var status = "Scan slowly · tap 3+ points on the FLAT wall · SET WALL"
     @Published var wallCount = 0
     @Published var aimedAtWall = false
     @Published var toast: String? = nil
     @Published var torchOn = false
     @Published var editingPlane = false          // lasso edit mode
     @Published var wallSet = false               // has the user designated a wall?
+    @Published var setPointCount = 0             // wall points placed so far
+    @Published var wallNudge: Double = 0         // wall depth adjustment, metres
     @Published var pressureBoost = 0            // index into [x1, x5, x10]
     @Published var dashMode = 0                 // .0 solid · .1 · .2 dotted line
     @Published var customShape: [CGPoint] = []  // normalized user-drawn cap
     @Published var drawingShape = false
+    // custom-cap tuning sliders
+    @Published var customScatter: Double = 0.2   // spacing / scatter around the shape
+    @Published var customScale: Double = 1.0     // overall spray size
+    @Published var customDotSize: Double = 0.5   // droplet size
+    @Published var customCount: Double = 1.2     // droplets per spray
 
     // commands consumed by the AR coordinator
     var clearRequested = false
@@ -65,6 +72,8 @@ final class PaintState: ObservableObject {
     var editToggleRequested = false
     var exportRequested = false
     var setWallRequested = false
+    var setPointTouch: CGPoint? = nil            // tap while placing wall points
+    var resetPointsRequested = false
     var editTouch: (point: CGPoint, phase: Int)? = nil   // 1 began · 2 moved · 3 ended
 
     static let nozzles: [SprayCap] = [
