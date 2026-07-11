@@ -4,6 +4,8 @@ import ARKit
 import SceneKit
 import Metal
 import AVFoundation
+import CoreImage
+import QuartzCore
 
 /// ONE user-designated wall. ARKit's plane detection only helps you AIM;
 /// tapping SET WALL freezes that plane as yours. Painting raycasts against
@@ -59,6 +61,10 @@ struct ARSprayView: UIViewRepresentable {
         private var setPointNodes: [SCNNode] = []
         private var firstHitTransform: simd_float4x4?
         private var lastNudge: Double = 0
+        private var motionBlurSet = false
+        // spray mist particles (screen-space overlay)
+        private var mistLayer: CAEmitterLayer?
+        private var mistCell: CAEmitterCell?
         private var viewCenter = CGPoint(x: UIScreen.main.bounds.midX,
                                          y: UIScreen.main.bounds.midY)
         private let viewSize = UIScreen.main.bounds.size
@@ -144,6 +150,11 @@ struct ARSprayView: UIViewRepresentable {
             }
             syncTorchAndLight()
 
+            if !motionBlurSet, let cam = arView?.pointOfView?.camera {
+                motionBlurSet = true
+                cam.motionBlurIntensity = 0.6   // paint smears on fast pans
+            }
+
             guard let view = arView, let frame = view.session.currentFrame else { return }
 
             if let est = frame.lightEstimate {
@@ -178,6 +189,10 @@ struct ARSprayView: UIViewRepresentable {
             if state.setWallRequested {
                 state.setWallRequested = false
                 setWall(view: view, camPos: camPos, camFwd: camFwd)
+            }
+            if state.scanReflectionRequested {
+                state.scanReflectionRequested = false
+                scanReflection(frame: frame)
             }
 
             // painting hits OUR wall's infinite plane — steady, no strobing
@@ -266,7 +281,9 @@ struct ARSprayView: UIViewRepresentable {
             }
 
             wall?.engine?.stepDrips(dt: dt)
-            wall?.engine?.flush()
+            wall?.engine?.flush(dt: dt)
+            stepMist(dt: dt, spraying: spraying && hit != nil,
+                     color: state.colors[state.colorIndex].ui, camRight: camRight)
         }
 
         // MARK: wall points — tap the FLAT spots; the wall passes through them
@@ -540,6 +557,66 @@ struct ARSprayView: UIViewRepresentable {
             }
         }
 
+        // MARK: reflection scan — snapshot the room, blur it, mirror on wet paint
+
+        private func scanReflection(frame: ARFrame) {
+            let buf = frame.capturedImage
+            let ci = CIImage(cvPixelBuffer: buf)
+            // downscale hard + blur → the low-res, dreamy reflection you asked for
+            let ctx = CIContext()
+            let scale: CGFloat = 220 / max(ci.extent.width, ci.extent.height)
+            let small = ci.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            let blurred = small.applyingGaussianBlur(sigma: 2.5).clamped(to: small.extent)
+            guard let cg = ctx.createCGImage(blurred, from: small.extent) else {
+                state.showToast("Reflection scan failed — try again")
+                return
+            }
+            wall?.canvasRef()?.setReflection(cg)
+            state.showToast("Reflection captured · wet paint now mirrors it")
+        }
+
+        // MARK: spray mist — faint coloured particles drifting up to the centre,
+        // carried sideways by camera motion for a parallax/3-D feel
+
+        private func ensureMist() {
+            guard mistLayer == nil, let view = arView else { return }
+            let cell = CAEmitterCell()
+            cell.birthRate = 0
+            cell.lifetime = 1.3
+            cell.velocity = 190
+            cell.velocityRange = 70
+            cell.yAcceleration = -40
+            cell.emissionLongitude = -.pi / 2      // upward
+            cell.emissionRange = .pi / 7
+            cell.scale = 0.5
+            cell.scaleRange = 0.4
+            cell.scaleSpeed = 0.7                   // widen as it rises
+            cell.alphaSpeed = -0.55
+            cell.contents = SprayMist.dotImage()
+            let layer = CAEmitterLayer()
+            layer.emitterShape = .line
+            layer.emitterSize = CGSize(width: 70, height: 1)
+            layer.emitterPosition = CGPoint(x: view.bounds.midX, y: view.bounds.maxY - 10)
+            layer.renderMode = .additive
+            layer.emitterCells = [cell]
+            view.layer.addSublayer(layer)
+            mistLayer = layer
+            mistCell = cell
+        }
+
+        private func stepMist(dt: Double, spraying: Bool, color: UIColor, camRight: simd_float3) {
+            ensureMist()
+            guard let layer = mistLayer, let cell = mistCell, let view = arView else { return }
+            cell.birthRate = spraying ? 26 : 0
+            cell.color = color.withAlphaComponent(0.16).cgColor
+            // camera pan → shift the emitter origin so older mist trails behind
+            let vx = CGFloat(camRight.x)   // rough horizontal pan proxy
+            let targetX = view.bounds.midX - vx * 40
+            let cur = layer.emitterPosition
+            layer.emitterPosition = CGPoint(x: cur.x + (targetX - cur.x) * 0.1,
+                                            y: view.bounds.maxY - 10)
+        }
+
         // MARK: camera color sampling (for the long-press eyedropper)
 
         private func sampleCameraColor(frame: ARFrame, at pt: CGPoint) -> UIColor? {
@@ -657,8 +734,15 @@ final class PaintSurface {
                             device: device, budget: budget, parent: node)
         c.onBudgetExceeded = onBudgetExceeded
         canvas = c
-        engine = SprayEngine(canvas: c, dripDirection: dripDirLocal)
+        // tilt = how vertical the surface is (wall normal vs world up).
+        // 1 on a wall → full drips · 0 on a floor/ceiling → no drips
+        let col = anchorTransform.columns.1
+        let n = simd_normalize(simd_float3(col.x, col.y, col.z))
+        let tilt = CGFloat(sqrt(max(0, 1 - n.y * n.y)))
+        engine = SprayEngine(canvas: c, dripDirection: dripDirLocal, tilt: tilt)
     }
+
+    func canvasRef() -> PaintCanvas? { canvas }
 
     func teardown() {
         canvas?.teardown()
@@ -880,4 +964,31 @@ extension simd_float4x4 {
 
 @inline(__always) func vec4(_ v: simd_float3, _ w: Float) -> simd_float4 {
     simd_float4(v.x, v.y, v.z, w)
+}
+
+// MARK: - SprayMist: a soft radial dot used by the mist emitter
+
+enum SprayMist {
+    static let dotImage: () -> CGImage? = {
+        var cached: CGImage?
+        return {
+            if let c = cached { return c }
+            let size = 32
+            let cs = CGColorSpaceCreateDeviceRGB()
+            guard let ctx = CGContext(data: nil, width: size, height: size,
+                                      bitsPerComponent: 8, bytesPerRow: 0, space: cs,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else { return nil }
+            let colors = [UIColor(white: 1, alpha: 1).cgColor,
+                          UIColor(white: 1, alpha: 0).cgColor] as CFArray
+            if let grad = CGGradient(colorsSpace: cs, colors: colors, locations: [0, 1]) {
+                ctx.drawRadialGradient(grad,
+                                       startCenter: CGPoint(x: 16, y: 16), startRadius: 0,
+                                       endCenter: CGPoint(x: 16, y: 16), endRadius: 16,
+                                       options: [])
+            }
+            cached = ctx.makeImage()
+            return cached
+        }
+    }()
 }

@@ -74,6 +74,7 @@ final class PaintState: ObservableObject {
     var setWallRequested = false
     var setPointTouch: CGPoint? = nil            // tap while placing wall points
     var resetPointsRequested = false
+    var scanReflectionRequested = false
     var editTouch: (point: CGPoint, phase: Int)? = nil   // 1 began · 2 moved · 3 ended
 
     static let nozzles: [SprayCap] = [
@@ -86,10 +87,10 @@ final class PaintState: ObservableObject {
         SprayCap(name: "Beef", deg: 13.0, dotScale: 1.0, countScale: 1.0,
                  scatterScale: 1.0, holeFrac: 0, chisel: false, dripMaxM: 0.35, icon: 17,
                  dirty: false, custom: false),
-        SprayCap(name: "Chisel", deg: 8.0, dotScale: 0.6, countScale: 1.4,
-                 scatterScale: 0.3, holeFrac: 0, chisel: true, dripMaxM: 0.30, icon: 0,
+        SprayCap(name: "Chisel", deg: 8.0, dotScale: 0.4, countScale: 2.2,
+                 scatterScale: 0.2, holeFrac: 0, chisel: true, dripMaxM: 0.30, icon: 0,
                  dirty: false, custom: false),
-        SprayCap(name: "Dirty", deg: 16.0, dotScale: 1.4, countScale: 0.8,
+        SprayCap(name: "Dirty", deg: 8.0, dotScale: 1.4, countScale: 0.8,
                  scatterScale: 1.4, holeFrac: 0, chisel: false, dripMaxM: 0.9, icon: 0,
                  dirty: true, custom: false),
         SprayCap(name: "Your cap", deg: 7.0, dotScale: 0.5, countScale: 1.2,

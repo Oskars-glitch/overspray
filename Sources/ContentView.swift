@@ -63,6 +63,15 @@ struct ContentView: View {
                             .frame(width: 38, height: 38)
                             .background(.ultraThinMaterial, in: Circle())
                     }
+                    if state.wallSet {
+                        Button(action: { state.scanReflectionRequested = true }) {
+                            Image(systemName: "sparkles")
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundColor(.white)
+                                .frame(width: 38, height: 38)
+                                .background(.ultraThinMaterial, in: Circle())
+                        }
+                    }
                     Button(action: { state.torchOn.toggle() }) {
                         Image(systemName: state.torchOn ? "flashlight.on.fill" : "flashlight.off.fill")
                             .font(.system(size: 15, weight: .semibold))

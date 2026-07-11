@@ -68,7 +68,10 @@ final class SprayEngine {
         var color: CGColor
     }
 
-    init(canvas: PaintCanvas, dripDirection: CGVector) {
+    private let tilt: CGFloat        // 1 = vertical wall · 0 = floor (no drips)
+
+    init(canvas: PaintCanvas, dripDirection: CGVector, tilt: CGFloat) {
+        self.tilt = min(1, max(0, tilt))
         self.canvas = canvas
         ppm = PaintCanvas.ppm
         sizePx = canvas.sizePx
@@ -87,7 +90,7 @@ final class SprayEngine {
         canvas.clearAll()
     }
 
-    func flush() { canvas.flush() }
+    func flush(dt: Double) { canvas.flush(dt: dt) }
 
     private func rnd() -> CGFloat { CGFloat.random(in: 0...1) }
     private func gaussRnd() -> CGFloat {
@@ -159,10 +162,16 @@ final class SprayEngine {
                 let r = (0.6 + rnd() * rnd() * 4.0) * mm * (1 + d * 0.6) * sMul
                 canvas.fillDot(p.x, p.y, max(0.9, r), color)
             }
-            for _ in 0..<Int(6 + 6 * d) {
-                let a = rnd() * .pi * 2, rr = R * (0.9 + rnd() * 1.8)
-                let p = placeWorld(cos(a) * rr, sin(a) * rr)
-                canvas.fillDot(p.x, p.y, max(0.9, (0.4 + rnd() * 2.6) * mm * sMul), color)
+            // individual splats: 2–4 tight clusters thrown around the blast
+            let patches = 2 + Int(rnd() * 3)
+            for _ in 0..<patches {
+                let a = rnd() * .pi * 2, rr = R * (0.7 + rnd() * 1.6)
+                let blobs = 3 + Int(rnd() * 5)
+                for _ in 0..<blobs {
+                    let p = placeWorld(cos(a) * rr + gaussRnd() * R * 0.12,
+                                       sin(a) * rr + gaussRnd() * R * 0.12)
+                    canvas.fillDot(p.x, p.y, max(0.9, (0.4 + rnd() * rnd() * 2.4) * mm * sMul), color)
+                }
             }
             if rnd() < 0.3 {
                 let p = place(gaussRnd() * sigma, gaussRnd() * sigma)
@@ -182,8 +191,9 @@ final class SprayEngine {
                     let offy = roll.dy * (t.x * R) + qy * (t.y * R) + gaussRnd() * jit
                     p = placeWorld(offx, offy)
                 } else if cap.chisel {
-                    let u = gaussRnd() * R
-                    let v = gaussRnd() * R * 0.14
+                    // crisp flat marker: uniform fill along the bar, hard ends
+                    let u = (rnd() * 2 - 1) * R * 0.96
+                    let v = gaussRnd() * R * 0.10
                     p = placeWorld(roll.dx * u - roll.dy * v, roll.dy * u + roll.dx * v)
                 } else if cap.holeFrac > 0 {
                     let rr = R * (cap.holeFrac + (1 - cap.holeFrac) * sqrt(rnd()))
@@ -237,7 +247,7 @@ final class SprayEngine {
                             stretch: CGFloat, sd: CGVector, cap: SprayCap,
                             charge: CGFloat, boost: CGFloat) {
         guard still > 0.01 else { return }
-        guard cap.dripMaxM > 0 else { return }
+        guard cap.dripMaxM > 0, tilt > 0.08 else { return }
         let dripGate = pow(min(1.0, max(0.0, (cap.dripMaxM - Double(d)) / cap.dripMaxM)), 1.8)
         guard dripGate > 0.02 else { return }
         // the wet zone hugs where dots ACTUALLY land, so drips can only start
@@ -254,6 +264,7 @@ final class SprayEngine {
         fluxD *= (1 + 0.8 * Double(charge))          // freshly shaken can drips more
         fluxD *= Double(boost)                        // pressure boost drips more
         if cap.dirty { fluxD *= 2.2 }                 // the dirty cap pours
+        fluxD *= Double(tilt)                         // angled surfaces drip less
         let flux = Float(fluxD)
         let g0x = max(0, Int((c.x - bound) / cellPx))
         let g1x = min(grid - 1, Int((c.x + bound) / cellPx))
@@ -325,7 +336,8 @@ final class SprayEngine {
         for i in stride(from: drips.count - 1, through: 0, by: -1) {
             var dr = drips[i]
             let remain = 1 - dr.travelled / dr.budget
-            let speed = max(0.004, (0.008 + Double(dr.vol) * 0.035) * Double(remain)) * Double(ppm)
+            let speed = max(0.004, (0.008 + Double(dr.vol) * 0.035) * Double(remain))
+                        * Double(ppm) * Double(max(0.15, tilt))
             let step = CGFloat(speed * dt)
             let wob = sin(dr.travelled * 0.012 + dr.seed) * step * dr.wobble
             let nx = dr.pos.x + dripDir.dx * step + dripPerp.dx * wob

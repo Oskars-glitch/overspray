@@ -5,7 +5,7 @@ import UIKit
 /// Global cap on allocated paint tiles (memory care for older iPhones).
 final class TileBudget {
     var used = 0
-    let maxTiles = 14
+    let maxTiles = 16
     var warned = false
 }
 
@@ -29,15 +29,27 @@ final class PaintCanvas {
     private var tiles: [Int: Tile] = [:]
     private(set) var contentRect: CGRect?          // union of everything painted
 
+    // wetness map: one low-res grid over the whole surface. 1 = just sprayed
+    // (fully reflective), decays to 0 (dry, dim reflection) over ~5 s.
+    private let wetN = 256
+    private var wet: [Float]
+    private var wetTex: MTLTexture?
+    private var wetProp: SCNMaterialProperty?
+    private var wetBuf: [UInt8]
+    private var reflectionCG: CGImage?
+    private var wetDirty = false
+
     final class Tile {
         let ctx: CGContext
         let bpr: Int
         let texture: MTLTexture
         let node: SCNNode
+        let material: SCNMaterial
         var dirty: CGRect?
         var mipsDirty = true          // mip chain needs regenerating after uploads
 
-        init?(device: MTLDevice) {
+        init?(device: MTLDevice, wetProp: SCNMaterialProperty?,
+              wetOff: CGPoint, wetScale: CGFloat, reflection: CGImage?) {
             let size = PaintCanvas.tilePx
             let cs = CGColorSpaceCreateDeviceRGB()
             guard let c = CGContext(data: nil, width: size, height: size,
@@ -63,27 +75,41 @@ final class PaintCanvas {
                             mipmapLevel: 0, withBytes: data, bytesPerRow: bpr)
             }
 
-            // wet-paint look: specular sheen ONLY on the paint (masked by its
-            // alpha) and ONLY from close up (fades out past ~0.9 m)
-            let material = SCNMaterial()
-            material.lightingModel = .blinn
-            material.diffuse.contents = tex
-            material.diffuse.mipFilter = .linear          // trilinear between mips
-            material.diffuse.maxAnisotropy = 4            // stays crisp at oblique views
-            material.specular.contents = UIColor(white: 0.23, alpha: 1)
-            material.shininess = 24
-            material.isDoubleSided = false
-            material.transparencyMode = .aOne
-            material.shaderModifiers = [
+            // wet-paint look: sheen masked by paint alpha; the scanned
+            // reflection mirrors on FRESH paint (95%) and fades to 30% as it
+            // dries over ~5 s (driven by the wetMap texture)
+            let m = SCNMaterial()
+            m.lightingModel = .blinn
+            m.diffuse.contents = tex
+            m.diffuse.mipFilter = .linear
+            m.diffuse.maxAnisotropy = 4
+            m.specular.contents = UIColor(white: 0.23, alpha: 1)
+            m.shininess = 24
+            m.isDoubleSided = false
+            m.transparencyMode = .aOne
+            if let r = reflection { m.reflective.contents = r; m.reflective.intensity = 1.0 }
+            m.shaderModifiers = [
                 .surface: """
+                #pragma arguments
+                texture2d<float> wetMap;
+                float2 wetOff;
+                float wetScale;
+                #pragma body
                 float camDist = length(_surface.position);
                 float near = clamp((1.6 - camDist) / 1.2, 0.0, 1.0);
+                constexpr sampler wetSmp(filter::linear);
+                float wet = wetMap.sample(wetSmp, wetOff + _surface.diffuseTexcoord * wetScale).r;
                 _surface.shininess = 4.0 + 70.0 * near * near;
-                _surface.specular.rgb = _surface.specular.rgb * _surface.diffuse.a * (0.35 + 0.65 * near);
+                _surface.specular.rgb = _surface.specular.rgb * _surface.diffuse.a * (0.35 + 0.65 * near) * (0.6 + 0.4 * wet);
+                _surface.reflective.rgb = _surface.reflective.rgb * _surface.diffuse.a * (0.30 + 0.65 * wet);
                 """
             ]
+            if let wp = wetProp { m.setValue(wp, forKey: "wetMap") }
+            m.setValue(NSValue(cgPoint: wetOff), forKey: "wetOff")
+            m.setValue(NSNumber(value: Double(wetScale)), forKey: "wetScale")
+            material = m
             let geo = SCNPlane(width: PaintCanvas.tileMeters, height: PaintCanvas.tileMeters)
-            geo.materials = [material]
+            geo.materials = [m]
             node = SCNNode(geometry: geo)
         }
     }
@@ -96,6 +122,51 @@ final class PaintCanvas {
         self.parent = parent
         tilesPerSide = Int((surfaceMeters / PaintCanvas.tileMeters).rounded())
         sizePx = CGFloat(tilesPerSide) * CGFloat(PaintCanvas.tilePx)
+        wet = .init(repeating: 0, count: wetN * wetN)
+        wetBuf = .init(repeating: 0, count: wetN * wetN)
+        let wd = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .r8Unorm, width: wetN, height: wetN, mipmapped: false)
+        wd.usage = [.shaderRead]
+        if let wt = device.makeTexture(descriptor: wd) {
+            wt.replace(region: MTLRegionMake2D(0, 0, wetN, wetN),
+                       mipmapLevel: 0, withBytes: wetBuf, bytesPerRow: wetN)
+            wetTex = wt
+            wetProp = SCNMaterialProperty(contents: wt)
+        }
+    }
+
+    /// The reflection image (scanned from the opposite direction) shared by
+    /// all tiles; enables the mirror-on-wet-paint look.
+    func setReflection(_ cg: CGImage) {
+        reflectionCG = cg
+        for t in tiles.values {
+            t.material.reflective.contents = cg
+            t.material.reflective.intensity = 1.0
+        }
+    }
+
+    /// Mark a canvas-space region as freshly wet (called from drawing ops).
+    private func wetten(_ x: CGFloat, _ y: CGFloat, _ r: CGFloat) {
+        let s = CGFloat(wetN) / sizePx
+        let gx0 = max(0, Int((x - r) * s)), gx1 = min(wetN - 1, Int((x + r) * s))
+        let gy0 = max(0, Int((y - r) * s)), gy1 = min(wetN - 1, Int((y + r) * s))
+        guard gx0 <= gx1, gy0 <= gy1 else { return }
+        for gy in gy0...gy1 { for gx in gx0...gx1 { wet[gy * wetN + gx] = 1 } }
+        wetDirty = true
+    }
+
+    /// Decay wetness toward dry (~5 s) and upload the map once per frame.
+    func stepWet(dt: Double) {
+        let dec = Float(dt / 5.0)
+        var changed = wetDirty
+        for i in 0..<wet.count where wet[i] > 0 {
+            wet[i] = max(0, wet[i] - dec); changed = true
+        }
+        guard changed, let wt = wetTex else { wetDirty = false; return }
+        for i in 0..<wet.count { wetBuf[i] = UInt8(wet[i] * 255) }
+        wt.replace(region: MTLRegionMake2D(0, 0, wetN, wetN),
+                   mipmapLevel: 0, withBytes: wetBuf, bytesPerRow: wetN)
+        wetDirty = false
     }
 
     // MARK: tile lookup / creation
@@ -106,10 +177,16 @@ final class PaintCanvas {
         if let t = tiles[key] { return t }
         guard create else { return nil }
         if budget.used >= budget.maxTiles {
-            if !budget.warned { budget.warned = true; onBudgetExceeded?() }
+            onBudgetExceeded?()          // fire every time so gaps are never silent
             return nil
         }
-        guard let t = Tile(device: device), let parent = parent else { return nil }
+        let wetOff = CGPoint(x: CGFloat(col) / CGFloat(tilesPerSide),
+                             y: CGFloat(row) / CGFloat(tilesPerSide))
+        let wetScale = 1.0 / CGFloat(tilesPerSide)
+        guard let t = Tile(device: device, wetProp: wetProp,
+                           wetOff: wetOff, wetScale: wetScale,
+                           reflection: reflectionCG),
+              let parent = parent else { return nil }
         budget.used += 1
         tiles[key] = t
         // position the tile plane inside the rotated paint root (its XY space)
@@ -142,6 +219,7 @@ final class PaintCanvas {
     // MARK: draw primitives (surface-px coordinates)
 
     func fillDot(_ x: CGFloat, _ y: CGFloat, _ r: CGFloat, _ color: CGColor, _ alpha: CGFloat = 1) {
+        wetten(x, y, r)
         let rect = CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2)
         withTiles(rect) { t, ox, oy in
             t.ctx.setFillColor(color)
@@ -152,6 +230,7 @@ final class PaintCanvas {
     }
 
     func strokeSeg(from: CGPoint, to: CGPoint, width: CGFloat, color: CGColor) {
+        wetten((from.x + to.x) / 2, (from.y + to.y) / 2, max(width, hypot(to.x - from.x, to.y - from.y)))
         let pad = width + 2
         let rect = CGRect(x: min(from.x, to.x) - pad, y: min(from.y, to.y) - pad,
                           width: abs(to.x - from.x) + pad * 2,
@@ -167,6 +246,7 @@ final class PaintCanvas {
     }
 
     func fillBlob(_ x: CGFloat, _ y: CGFloat, _ rw: CGFloat, _ rh: CGFloat, _ color: CGColor) {
+        wetten(x, y, max(rw, rh))
         let rect = CGRect(x: x - rw, y: y - rh, width: rw * 2, height: rh * 2)
         withTiles(rect) { t, ox, oy in
             t.ctx.setFillColor(color)
@@ -178,7 +258,8 @@ final class PaintCanvas {
     // MARK: maintenance
 
     /// Upload only what changed on each touched tile. Call once per frame.
-    func flush() {
+    func flush(dt: Double = 0) {
+        if dt > 0 { stepWet(dt: dt) }
         let size = PaintCanvas.tilePx
         for t in tiles.values {
             guard var r = t.dirty, let data = t.ctx.data else { continue }
