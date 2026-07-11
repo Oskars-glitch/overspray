@@ -135,20 +135,20 @@ final class PaintCanvas {
                     // sines so the pattern is cloudy, never a lattice, and a
                     // SMALL amplitude — less is more. Distance-damped against
                     // shimmer.
-                    float2 bp = wuv * 2500.0;
+                    float2 bp = wuv * 12500.0;
                     float bx = sin(bp.x + sin(bp.y * 1.71 + 1.3)) + 0.5 * sin((bp.x + bp.y) * 0.37 + 4.1);
                     float by = sin(bp.y * 0.89 + sin(bp.x * 1.29 + 2.6)) - 0.5 * sin((bp.x - bp.y) * 0.41 + 0.7);
                     float3 bref = abs(_surface.normal.y) > 0.8 ? float3(1.0, 0.0, 0.0) : float3(0.0, 1.0, 0.0);
                     float3 bt = normalize(cross(_surface.normal, bref));
                     float3 bb = cross(_surface.normal, bt);
-                    float amp = 0.12 * bumpy * (0.35 + 0.65 * near);
+                    float amp = 0.012 * bumpy * (0.35 + 0.65 * near);
                     _surface.normal = normalize(_surface.normal + (bt * bx + bb * by) * amp);
                 }
                 // torch: brighter AND tighter — higher shininess shrinks and
                 // sharpens the highlight the flashlight throws on wet paint
                 _surface.shininess = (4.0 + 70.0 * near * near) * (1.0 - 0.75 * rough) * (1.0 + 1.2 * torchBoost);
                 _surface.specular.rgb = _surface.specular.rgb * _surface.diffuse.a * (0.35 + 0.65 * near) * (0.6 + 0.4 * wet) * (1.0 - 0.45 * rough) * (1.0 + 0.6 * torchBoost);
-                float refK = (0.20 + 0.80 * wet) * (1.0 + 0.5 * torchBoost) * (1.0 - 0.55 * rough);
+                float refK = (0.20 + 0.78 * wet) * (1.0 + 0.5 * torchBoost) * (1.0 - 0.55 * rough);
                 _surface.reflective.rgb = _surface.reflective.rgb * _surface.diffuse.a * min(refK, 1.0);
                 """
             ]
