@@ -176,15 +176,23 @@ struct ContentView: View {
                 }
             }
 
-            // depth nudge while lasso-editing: slide the wall closer / away
+            // lasso tools + depth nudge while editing
             if state.editingPlane {
                 VStack {
                     Spacer()
-                    VStack(spacing: 6) {
-                        Text(String(format: "Wall depth  %+d mm", Int(state.wallNudge * 1000)))
-                            .font(.footnote.weight(.semibold))
-                            .foregroundColor(.white)
-                        Slider(value: $state.wallNudge, in: -0.10...0.10)
+                    VStack(spacing: 12) {
+                        HStack(spacing: 10) {
+                            ForEach([EditTool.add, .cut, .glossy, .rough, .bumpy],
+                                    id: \.self) { tool in
+                                EditToolButton(state: state, tool: tool)
+                            }
+                        }
+                        VStack(spacing: 6) {
+                            Text(String(format: "Wall depth  %+d mm", Int(state.wallNudge * 1000)))
+                                .font(.footnote.weight(.semibold))
+                                .foregroundColor(.white)
+                            Slider(value: $state.wallNudge, in: -0.10...0.10)
+                        }
                     }
                     .padding(14)
                     .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
@@ -216,6 +224,75 @@ struct ContentView: View {
                         .padding(.bottom, 130)
                 }
                 .transition(.opacity)
+            }
+        }
+    }
+}
+
+/// One lasso tool: + and − reshape the mask; the rest paint wall materials.
+/// Icons per Oskars' spec: stripes = glossy, dots = rough, checker = bumpy.
+struct EditToolButton: View {
+    @ObservedObject var state: PaintState
+    let tool: EditTool
+
+    var body: some View {
+        Button(action: {
+            state.editTool = tool
+            switch tool {
+            case .add:    state.showToast("Lasso adds paintable area")
+            case .cut:    state.showToast("Lasso cuts — nothing lands there")
+            case .glossy: state.showToast("Material: glossy (default)")
+            case .rough:  state.showToast("Material: rough — matte sheen")
+            case .bumpy:  state.showToast("Material: bumpy — breaks the paint")
+            }
+        }) {
+            ZStack {
+                Circle().fill(.ultraThinMaterial).frame(width: 40, height: 40)
+                icon
+            }
+            .overlay(Circle().strokeBorder(
+                state.editTool == tool ? Color.orange : Color.white.opacity(0.25),
+                lineWidth: 2))
+        }
+    }
+
+    @ViewBuilder private var icon: some View {
+        switch tool {
+        case .add:
+            Image(systemName: "plus")
+                .font(.system(size: 15, weight: .bold)).foregroundColor(.white)
+        case .cut:
+            Image(systemName: "minus")
+                .font(.system(size: 15, weight: .bold)).foregroundColor(.red)
+        case .glossy:
+            HStack(spacing: 3) {
+                ForEach(0..<3, id: \.self) { _ in
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(Color.white).frame(width: 3, height: 16)
+                }
+            }
+            .rotationEffect(.degrees(20))
+        case .rough:
+            VStack(spacing: 3) {
+                ForEach(0..<3, id: \.self) { _ in
+                    HStack(spacing: 3) {
+                        ForEach(0..<3, id: \.self) { _ in
+                            Circle().fill(Color.white).frame(width: 3, height: 3)
+                        }
+                    }
+                }
+            }
+        case .bumpy:
+            VStack(spacing: 1) {
+                ForEach(0..<3, id: \.self) { r in
+                    HStack(spacing: 1) {
+                        ForEach(0..<3, id: \.self) { c in
+                            Rectangle()
+                                .fill((r + c) % 2 == 0 ? Color.white : Color.white.opacity(0.22))
+                                .frame(width: 5, height: 5)
+                        }
+                    }
+                }
             }
         }
     }

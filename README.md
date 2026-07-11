@@ -31,7 +31,9 @@ Works on **all ARKit-capable iPhones** — no LiDAR required. Requires iOS 16+.
   wobbles, and ends in a blob, pulled by real-world gravity regardless of how
   the wall is oriented
 - **Can pressure** — output fades the longer you spray; physically shake the
-  phone to restore pressure. A freshly shaken can spatters and drips more
+  phone to restore pressure. A freshly shaken can sprays *dirty* for a few
+  seconds — a looser cone, more paint, spatter flecks, heavier drips —
+  relaxing back to a clean spray as the charge settles
 - **Wet paint that dries** — fresh paint carries a glossy sheen (optionally
   mirroring a scanned snapshot of the room) and dries to matte over ~25
   seconds. A stroke stays fully wet until you release the trigger, then dries
@@ -121,6 +123,25 @@ push:
    in, sign in with a free Apple ID, press *Start*.
 4. Enable Developer Mode and trust the certificate as above. Re-sideload
    every 7 days — Sideloadly remembers the setup.
+
+### How long the app stays on the phone
+
+The limit is Apple's signing policy, not the app:
+
+| Signing | App runs for | Cost |
+|---|---|---|
+| Free Apple ID (Sideloadly/Xcode) | **7 days**, then it stops launching until re-signed | free |
+| Apple Developer Program | **1 year** per install; TestFlight builds 90 days | $99/year |
+| App Store release | permanent | $99/year + App Review |
+
+Ways to make the 7-day cycle painless or remove it:
+
+- **AltStore / SideStore** can re-sign automatically in the background
+  whenever the phone shares Wi-Fi with a computer running AltServer — the
+  7-day limit still exists but you stop noticing it.
+- **A paid developer account** is the clean fix: sign with it in Sideloadly
+  and each install lasts a year.
+- Re-running Sideloadly manually is two clicks; it remembers everything.
 
 ## Custom sounds
 

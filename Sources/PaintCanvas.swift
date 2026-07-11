@@ -37,6 +37,7 @@ final class PaintCanvas {
     // so no cell edge ever shows as a square.
     static let wetN = 1024                  // grid cells per side (1.2 cm)
     static let dryEndSeconds = 25.0         // trigger release → fully matte
+    static let matN = 600                   // material grid, same lattice as the mask
     private var wet: [Float]
     private var pinned: [Bool]              // wet-locked until trigger release
     private var pinnedIdx: [Int] = []       // what to unpin, without a grid walk
@@ -48,6 +49,10 @@ final class PaintCanvas {
     private var blockStage = [UInt8](repeating: 0, count: 32 * 32)
     private var wetTex: MTLTexture?
     private var wetProp: SCNMaterialProperty?
+    // wall material per region: 0 glossy · ½ rough · 1 bumpy, sampled by the
+    // tile shader with the same offsets as the wet map
+    private var matTex: MTLTexture?
+    private var matProp: SCNMaterialProperty?
     private var reflectionCG: CGImage?
     private var wetDirty = false
 
@@ -61,7 +66,9 @@ final class PaintCanvas {
         var mipsDirty = true          // mip chain needs regenerating after uploads
 
         init?(device: MTLDevice, wetProp: SCNMaterialProperty?,
-              wetOff: CGPoint, wetScale: CGFloat, reflection: CGImage?) {
+              matProp: SCNMaterialProperty?,
+              wetOff: CGPoint, wetScale: CGFloat, reflection: CGImage?,
+              torch: Float) {
             let size = PaintCanvas.tilePx
             let cs = CGColorSpaceCreateDeviceRGB()
             guard let c = CGContext(data: nil, width: size, height: size,
@@ -99,24 +106,51 @@ final class PaintCanvas {
             m.shininess = 24
             m.isDoubleSided = false
             m.transparencyMode = .aOne
-            if let r = reflection { m.reflective.contents = r; m.reflective.intensity = 1.0 }
+            if let r = reflection {
+                m.reflective.contents = r
+                m.reflective.intensity = 1.0
+                // mips supply the distance blur: sharp base image close up,
+                // minification blurs it as you step back
+                m.reflective.mipFilter = .linear
+            }
             m.shaderModifiers = [
                 .surface: """
                 #pragma arguments
                 texture2d<float> wetMap;
+                texture2d<float> matMap;
                 float2 wetOff;
                 float wetScale;
+                float torchBoost;
                 #pragma body
                 float camDist = length(_surface.position);
                 float near = clamp((1.6 - camDist) / 1.2, 0.0, 1.0);
                 constexpr sampler wetSmp(filter::linear);
-                float wet = wetMap.sample(wetSmp, wetOff + _surface.diffuseTexcoord * wetScale).r;
-                _surface.shininess = 4.0 + 70.0 * near * near;
-                _surface.specular.rgb = _surface.specular.rgb * _surface.diffuse.a * (0.35 + 0.65 * near) * (0.6 + 0.4 * wet);
-                _surface.reflective.rgb = _surface.reflective.rgb * _surface.diffuse.a * (0.30 + 0.65 * wet);
+                float2 wuv = wetOff + _surface.diffuseTexcoord * wetScale;
+                float wet = wetMap.sample(wetSmp, wuv).r;
+                float mat = matMap.sample(wetSmp, wuv).r * 2.0;
+                float rough = clamp(mat, 0.0, 1.0);
+                float bumpy = clamp(mat - 1.0, 0.0, 1.0);
+                if (bumpy > 0.01) {
+                    // procedural ~3 cm micro-normals; damped with distance so
+                    // they never alias into shimmer
+                    float2 bp = wuv * 2500.0;
+                    float bx = sin(bp.x + sin(bp.y * 0.73) * 2.1);
+                    float by = cos(bp.y * 1.09 + sin(bp.x * 0.61) * 2.3);
+                    float3 bref = abs(_surface.normal.y) > 0.8 ? float3(1.0, 0.0, 0.0) : float3(0.0, 1.0, 0.0);
+                    float3 bt = normalize(cross(_surface.normal, bref));
+                    float3 bb = cross(_surface.normal, bt);
+                    float amp = 0.45 * bumpy * (0.35 + 0.65 * near);
+                    _surface.normal = normalize(_surface.normal + (bt * bx + bb * by) * amp);
+                }
+                _surface.shininess = (4.0 + 70.0 * near * near) * (1.0 - 0.75 * rough);
+                _surface.specular.rgb = _surface.specular.rgb * _surface.diffuse.a * (0.35 + 0.65 * near) * (0.6 + 0.4 * wet) * (1.0 - 0.45 * rough);
+                float refK = (0.30 + 0.68 * wet) * (1.0 + 0.35 * torchBoost) * (1.0 - 0.55 * rough);
+                _surface.reflective.rgb = _surface.reflective.rgb * _surface.diffuse.a * min(refK, 1.0);
                 """
             ]
             if let wp = wetProp { m.setValue(wp, forKey: "wetMap") }
+            if let mp = matProp { m.setValue(mp, forKey: "matMap") }
+            m.setValue(NSNumber(value: torch), forKey: "torchBoost")
             m.setValue(NSValue(cgPoint: wetOff), forKey: "wetOff")
             m.setValue(NSNumber(value: Double(wetScale)), forKey: "wetScale")
             material = m
@@ -147,6 +181,27 @@ final class PaintCanvas {
             wetTex = wt
             wetProp = SCNMaterialProperty(contents: wt)
         }
+        let mn = PaintCanvas.matN
+        let md = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .r8Unorm, width: mn, height: mn, mipmapped: false)
+        md.usage = [.shaderRead]
+        if let mt = device.makeTexture(descriptor: md) {
+            let zero = [UInt8](repeating: 0, count: mn * mn)
+            mt.replace(region: MTLRegionMake2D(0, 0, mn, mn),
+                       mipmapLevel: 0, withBytes: zero, bytesPerRow: mn)
+            matTex = mt
+            matProp = SCNMaterialProperty(contents: mt)
+        }
+    }
+
+    /// Push the surface's material grid (values 0/1/2 per cell) to the GPU.
+    func setMaterialGrid(_ g: [UInt8]) {
+        let mn = PaintCanvas.matN
+        guard g.count == mn * mn, let mt = matTex else { return }
+        var bytes = [UInt8](repeating: 0, count: g.count)
+        for i in 0..<g.count { bytes[i] = g[i] == 0 ? 0 : (g[i] == 1 ? 128 : 255) }
+        mt.replace(region: MTLRegionMake2D(0, 0, mn, mn),
+                   mipmapLevel: 0, withBytes: bytes, bytesPerRow: mn)
     }
 
     /// The reflection image (scanned from the opposite direction) shared by
@@ -156,8 +211,19 @@ final class PaintCanvas {
         for t in tiles.values {
             t.material.reflective.contents = cg
             t.material.reflective.intensity = 1.0
+            t.material.reflective.mipFilter = .linear
         }
     }
+
+    /// Flashlight state → the sheen brightens on wet paint (shader uniform).
+    func setTorchBoost(_ v: Float) {
+        guard torchBoost != v else { return }
+        torchBoost = v
+        for t in tiles.values {
+            t.material.setValue(NSNumber(value: v), forKey: "torchBoost")
+        }
+    }
+    private var torchBoost: Float = 0
 
     /// Mark a soft wet disc, canvas px. Falloff is computed from the float
     /// centre — no grid snapping — so the sheen never shows a square edge.
@@ -263,9 +329,9 @@ final class PaintCanvas {
         let wetOff = CGPoint(x: CGFloat(col) / CGFloat(tilesPerSide),
                              y: CGFloat(row) / CGFloat(tilesPerSide))
         let wetScale = 1.0 / CGFloat(tilesPerSide)
-        guard let t = Tile(device: device, wetProp: wetProp,
+        guard let t = Tile(device: device, wetProp: wetProp, matProp: matProp,
                            wetOff: wetOff, wetScale: wetScale,
-                           reflection: reflectionCG),
+                           reflection: reflectionCG, torch: torchBoost),
               let parent = parent else { return nil }
         budget.used += 1
         tiles[key] = t

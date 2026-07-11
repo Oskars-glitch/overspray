@@ -14,7 +14,7 @@ final class CanPhysics {
     func tick(spraying: Bool, dt: Double) {
         if spraying {
             pressure = max(0.45, pressure - dt * 0.05)
-            charge = max(0, charge - dt * 0.9)
+            charge = max(0, charge - dt * 0.55)   // a full shake stays dirty ~5 s
         } else {
             pressure = min(1.0, pressure + dt * 0.008)
         }
@@ -69,9 +69,18 @@ final class SprayEngine {
     }
 
     private let tilt: CGFloat        // 1 = vertical wall · 0 = floor (no drips)
+    // the paintable mask, per droplet: a cut region is NOT WALL (a window, a
+    // door) — nothing may land there, not even a stray splat
+    private let allowed: (CGPoint) -> Bool
+    // wall material under a point: 0 glossy · 1 rough · 2 bumpy
+    private let materialAt: (CGPoint) -> UInt8
 
-    init(canvas: PaintCanvas, dripDirection: CGVector, tilt: CGFloat) {
+    init(canvas: PaintCanvas, dripDirection: CGVector, tilt: CGFloat,
+         allowed: @escaping (CGPoint) -> Bool,
+         materialAt: @escaping (CGPoint) -> UInt8) {
         self.tilt = min(1, max(0, tilt))
+        self.allowed = allowed
+        self.materialAt = materialAt
         self.canvas = canvas
         ppm = PaintCanvas.ppm
         sizePx = canvas.sizePx
@@ -123,6 +132,7 @@ final class SprayEngine {
         // stroke drying next door.
         let closeW = min(1, max(0, (0.85 - CGFloat(d)) / 0.85))
         let sigmaW = CGFloat(radius) * (0.30 + 0.50 * (1 - closeW)) * cap.scatterScale
+                     * (1 + 0.18 * min(charge, 2.5))    // charged strays stay wet
         let wetR = cap.dirty ? CGFloat(radius) * 2.4
                  : (cap.chisel || cap.custom) ? CGFloat(radius) * 1.2
                  : sigmaW * 2
@@ -158,17 +168,33 @@ final class SprayEngine {
         @inline(__always) func placeWorld(_ offx: CGFloat, _ offy: CGFloat) -> CGPoint {
             place(offx * sd.dx + offy * sd.dy, -offx * sd.dy + offy * sd.dx)
         }
+        // bumpy wall: a fixed spatial hash rejects droplets in the "valleys" —
+        // the SAME cells stay open on every pass, so respraying reads as
+        // surface texture, not random noise
+        let bumpyWall = materialAt(c) == 2
+        @inline(__always) func speckleOK(_ p: CGPoint) -> Bool {
+            guard bumpyWall else { return true }
+            let gx = (p.x / 33).rounded(.down), gy = (p.y / 33).rounded(.down)
+            let h = sin(gx * 12.9898 + gy * 78.233) * 43758.5453
+            return h - h.rounded(.down) > 0.38
+        }
+        @inline(__always) func dot(_ p: CGPoint, _ r: CGFloat) {
+            if allowed(p), speckleOK(p) { canvas.fillDot(p.x, p.y, r, color) }
+        }
 
         // pressure boost ×1/×5/×10: split between MORE dots and BIGGER dots
         // so the frame budget survives on older phones
         let cMul = min(boost, 4)
         let sMul = sqrt(boost / cMul)
 
+        // freshly shaken can: looser cone, more paint, for a few seconds
+        let ch = min(charge, 2.5)
         let close = min(1, max(0, (0.85 - d) / 0.85))
-        let sigma = R * (0.30 + 0.50 * (1 - close)) * cap.scatterScale
+        let sigma = R * (0.30 + 0.50 * (1 - close)) * cap.scatterScale * (1 + 0.18 * ch)
         let fineFade = cap.dotScale < 0.3 ? pow(close, 0.7) : 1.0
-        var count = Int((60 + 240 * close) * k * 5 * cap.countScale * fineFade * pressure * cMul)
-        count = min(count, max(80, 6500 / budgetShare))
+        var count = Int((60 + 240 * close) * k * 5 * cap.countScale * fineFade * pressure * cMul
+                        * (1 + 0.35 * ch))
+        count = min(count, max(80, Int(6500 * (1 + 0.25 * ch)) / budgetShare))
         let mm = ppm / 1000
 
         if cap.dirty {
@@ -176,7 +202,7 @@ final class SprayEngine {
             for _ in 0..<max(6, count / 3) {
                 let p = place(gaussRnd() * sigma, gaussRnd() * sigma)
                 let r = (0.6 + rnd() * rnd() * 4.0) * mm * (1 + d * 0.6) * sMul
-                canvas.fillDot(p.x, p.y, max(0.9, r), color)
+                dot(p, max(0.9, r))
             }
             // individual splats: 2–4 tight clusters thrown around the blast
             let patches = 2 + Int(rnd() * 3)
@@ -186,12 +212,12 @@ final class SprayEngine {
                 for _ in 0..<blobs {
                     let p = placeWorld(cos(a) * rr + gaussRnd() * R * 0.12,
                                        sin(a) * rr + gaussRnd() * R * 0.12)
-                    canvas.fillDot(p.x, p.y, max(0.9, (0.4 + rnd() * rnd() * 2.4) * mm * sMul), color)
+                    dot(p, max(0.9, (0.4 + rnd() * rnd() * 2.4) * mm * sMul))
                 }
             }
             if rnd() < 0.3 {
                 let p = place(gaussRnd() * sigma, gaussRnd() * sigma)
-                canvas.fillDot(p.x, p.y, (2.0 + rnd() * 5.0) * mm * sMul, color)
+                dot(p, (2.0 + rnd() * 5.0) * mm * sMul)
             }
         } else {
             for _ in 0..<count {
@@ -228,28 +254,30 @@ final class SprayEngine {
                     p = place(gaussRnd() * sigma, gaussRnd() * sigma)
                 }
                 let r = (0.10 + rnd() * rnd() * 0.45) * (1 + d * 0.5) * mm * cap.dotScale * sMul
-                canvas.fillDot(p.x, p.y, max(0.9, r), color)
+                dot(p, max(0.9, r))
             }
             if d > 0.35, cap.scatterScale > 0.35 {
                 let spl = Int((3 * d * Double(cap.scatterScale)).rounded())
                 for _ in 0..<spl {
                     let a = rnd() * .pi * 2, rr = R * (1.15 + rnd() * 1.4)
                     let p = placeWorld(cos(a) * rr, sin(a) * rr)
-                    canvas.fillDot(p.x, p.y,
-                                   max(0.9, (0.15 + rnd() * 0.4) * mm * (1 + d * 0.5) * cap.dotScale * sMul),
-                                   color)
+                    dot(p, max(0.9, (0.15 + rnd() * 0.4) * mm * (1 + d * 0.5) * cap.dotScale * sMul))
                 }
             }
             if !cap.chisel, !cap.custom, d > 0.3, rnd() < 0.06 * Double(cap.scatterScale) {
                 let p = place(gaussRnd() * R * 0.8, gaussRnd() * R * 0.8)
-                canvas.fillDot(p.x, p.y, (0.5 + rnd() * 0.9) * mm * 2 * sMul, color)
+                dot(p, (0.5 + rnd() * 0.9) * mm * 2 * sMul)
             }
         }
 
-        // freshly shaken can: FINE spatter at the start of the spray
-        if charge > 0.05, rnd() < 0.08 * charge {
-            let p = place(gaussRnd() * sigma * 0.9, gaussRnd() * sigma * 0.9)
-            canvas.fillDot(p.x, p.y, max(0.9, (0.15 + rnd() * 0.30) * mm * (1 + 0.3 * charge) * sMul), color)
+        // freshly shaken can: a real spatter burst, thrown wider and fatter
+        // than the cone droplets
+        if charge > 0.05 {
+            let burst = Int((1.5 * charge).rounded(.up))
+            for _ in 0..<burst where rnd() < 0.35 {
+                let p = place(gaussRnd() * sigma * 1.4, gaussRnd() * sigma * 1.4)
+                dot(p, max(0.9, (0.15 + rnd() * 0.35) * mm * (1 + 0.3 * charge) * sMul))
+            }
         }
 
         accumulate(at: c, d: d, k: k, R: R, sigma: sigma, color: color,
@@ -337,6 +365,7 @@ final class SprayEngine {
 
     private func spawnDrip(x: CGFloat, y: CGFloat, vol: CGFloat, color: CGColor,
                            jitterM: CGFloat = 0.003) {
+        guard allowed(CGPoint(x: x, y: y)) else { return }
         drips.append(Drip(
             origin: CGPoint(x: x, y: y),
             pos: CGPoint(x: x + gaussRnd() * jitterM * ppm, y: y),
@@ -361,6 +390,9 @@ final class SprayEngine {
             let nx = dr.pos.x + dripDir.dx * step + dripPerp.dx * wob
             let ny = dr.pos.y + dripDir.dy * step + dripPerp.dy * wob
             let w = dr.width * (0.35 + 0.65 * remain)
+
+            // the mask edge is not wall — a drip dies there, no blob
+            guard allowed(CGPoint(x: nx, y: ny)) else { drips.remove(at: i); continue }
 
             canvas.strokeSeg(from: dr.pos, to: CGPoint(x: nx, y: ny), width: w, color: dr.color)
             canvas.wetten((dr.pos.x + nx) / 2, (dr.pos.y + ny) / 2, max(w * 1.5, step))

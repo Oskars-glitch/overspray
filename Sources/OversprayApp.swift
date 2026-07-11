@@ -26,6 +26,16 @@ struct SprayCap {
     let custom: Bool           // user-drawn spray shape (blank cap)
 }
 
+/// What a lasso stroke does in edit mode: reshape the paintable mask, or
+/// paint a wall material into the lassoed region.
+enum EditTool {
+    case add      // grow the paintable area
+    case cut      // remove from it (nothing may land there — not wall)
+    case glossy   // the default surface — today's look
+    case rough    // matte: dimmer, wider, duller sheen
+    case bumpy    // rough + micro-normals + paint misses the valleys
+}
+
 /// Shared state between the SwiftUI overlay and the AR coordinator.
 final class PaintState: ObservableObject {
     // controls
@@ -52,6 +62,7 @@ final class PaintState: ObservableObject {
     @Published var toast: String? = nil
     @Published var torchOn = false
     @Published var editingPlane = false          // lasso edit mode
+    @Published var editTool: EditTool = .add     // active lasso tool
     @Published var wallSet = false               // has the user designated a wall?
     @Published var setPointCount = 0             // wall points placed so far
     @Published var wallNudge: Double = 0         // wall depth adjustment, metres
