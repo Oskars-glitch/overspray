@@ -283,7 +283,7 @@ struct ARSprayView: UIViewRepresentable {
             wall?.engine?.stepDrips(dt: dt)
             wall?.engine?.flush(dt: dt)
             stepMist(dt: dt, spraying: spraying && hit != nil,
-                     color: state.colors[state.colorIndex].ui, camRight: camRight)
+                     color: state.colors[state.colorIndex], camRight: camRight)
         }
 
         // MARK: wall points — tap the FLAT spots; the wall passes through them
