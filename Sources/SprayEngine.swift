@@ -117,6 +117,22 @@ final class SprayEngine {
         // robotised dotted line: fixed-frequency time chopping
         guard CanPhysics.shared.dashTick(dt: dt, mode: dashMode) else { return }
 
+        // sheen: one soft wet capsule along the path, sized to where droplets
+        // actually land. Overshoot is invisible (the shader masks wetness by
+        // paint alpha) but it must stay tight enough not to re-wet an older
+        // stroke drying next door.
+        let closeW = min(1, max(0, (0.85 - CGFloat(d)) / 0.85))
+        let sigmaW = CGFloat(radius) * (0.30 + 0.50 * (1 - closeW)) * cap.scatterScale
+        let wetR = cap.dirty ? CGFloat(radius) * 2.4
+                 : (cap.chisel || cap.custom) ? CGFloat(radius) * 1.2
+                 : sigmaW * 2
+        let wetSteps = max(1, Int(ceil(pathLen / max(wetR * 0.5, 1))))
+        for i in 0...wetSteps {
+            let f = CGFloat(i) / CGFloat(wetSteps)
+            canvas.wetten(from.x + (to.x - from.x) * f,
+                          from.y + (to.y - from.y) * f, wetR)
+        }
+
         for s in 1...stamps {
             let f = CGFloat(s) / CGFloat(stamps)
             let p = CGPoint(x: from.x + (to.x - from.x) * f,
@@ -191,9 +207,11 @@ final class SprayEngine {
                     let offy = roll.dy * (t.x * R) + qy * (t.y * R) + gaussRnd() * jit
                     p = placeWorld(offx, offy)
                 } else if cap.chisel {
-                    // crisp flat marker: uniform fill along the bar, hard ends
+                    // crisp flat marker: uniform fill along the bar, hard ends.
+                    // deg halved + 0.40 across = a bar half as long and twice
+                    // as thick as the old 8°/0.10 blade
                     let u = (rnd() * 2 - 1) * R * 0.96
-                    let v = gaussRnd() * R * 0.10
+                    let v = gaussRnd() * R * 0.40
                     p = placeWorld(roll.dx * u - roll.dy * v, roll.dy * u + roll.dx * v)
                 } else if cap.holeFrac > 0 {
                     let rr = R * (cap.holeFrac + (1 - cap.holeFrac) * sqrt(rnd()))
@@ -345,6 +363,7 @@ final class SprayEngine {
             let w = dr.width * (0.35 + 0.65 * remain)
 
             canvas.strokeSeg(from: dr.pos, to: CGPoint(x: nx, y: ny), width: w, color: dr.color)
+            canvas.wetten((dr.pos.x + nx) / 2, (dr.pos.y + ny) / 2, max(w * 1.5, step))
 
             dr.pos = CGPoint(x: nx, y: ny)
             dr.travelled += step
@@ -353,6 +372,7 @@ final class SprayEngine {
                 if dr.endBlob, !off {
                     canvas.fillBlob(dr.pos.x, dr.pos.y,
                                     w * (0.6 + rnd() * 0.4), w * (0.9 + rnd() * 0.6), dr.color)
+                    canvas.wetten(dr.pos.x, dr.pos.y, w * 1.6)
                 }
                 drips.remove(at: i)
             } else {

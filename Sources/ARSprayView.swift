@@ -280,6 +280,10 @@ struct ARSprayView: UIViewRepresentable {
                 }
             }
 
+            // per-frame, not on the edge: the canvas is born lazily on the
+            // first painted tile, possibly mid-hold, and must still learn
+            // that a stroke is running
+            wall?.canvasRef()?.setStroking(spraying)
             wall?.engine?.stepDrips(dt: dt)
             wall?.engine?.flush(dt: dt)
             stepMist(dt: dt, spraying: spraying && hit != nil,

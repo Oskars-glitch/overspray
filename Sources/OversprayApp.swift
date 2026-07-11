@@ -87,7 +87,7 @@ final class PaintState: ObservableObject {
         SprayCap(name: "Beef", deg: 13.0, dotScale: 1.0, countScale: 1.0,
                  scatterScale: 1.0, holeFrac: 0, chisel: false, dripMaxM: 0.35, icon: 17,
                  dirty: false, custom: false),
-        SprayCap(name: "Chisel", deg: 8.0, dotScale: 0.4, countScale: 2.2,
+        SprayCap(name: "Chisel", deg: 4.0, dotScale: 0.4, countScale: 2.2,
                  scatterScale: 0.2, holeFrac: 0, chisel: true, dripMaxM: 0.30, icon: 0,
                  dirty: false, custom: false),
         SprayCap(name: "Dirty", deg: 8.0, dotScale: 1.4, countScale: 0.8,

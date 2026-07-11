@@ -29,13 +29,25 @@ final class PaintCanvas {
     private var tiles: [Int: Tile] = [:]
     private(set) var contentRect: CGRect?          // union of everything painted
 
-    // wetness map: one low-res grid over the whole surface. 1 = just sprayed
-    // (fully reflective), decays to 0 (dry, dim reflection) over ~5 s.
-    private let wetN = 256
+    // wetness map: one grid over the whole surface. 1 = just sprayed (fully
+    // reflective), fading to 0 (dry, dim reflection). Cells touched while the
+    // trigger is held are PINNED fully wet — the whole stroke starts drying
+    // together on release, never while it is still being painted. 1024 cells
+    // = 1.2 cm at 12 m, and wetten() writes soft discs from the float centre,
+    // so no cell edge ever shows as a square.
+    static let wetN = 1024                  // grid cells per side (1.2 cm)
+    static let dryEndSeconds = 25.0         // trigger release → fully matte
     private var wet: [Float]
+    private var pinned: [Bool]              // wet-locked until trigger release
+    private var pinnedIdx: [Int] = []       // what to unpin, without a grid walk
+    private var stroking = false
+    // coarse occupancy: stepWet only walks 32×32-cell blocks holding wetness —
+    // the grid is a million cells and this runs on the render thread
+    private let blockN = PaintCanvas.wetN / 32
+    private var liveBlocks: Set<Int> = []
+    private var blockStage = [UInt8](repeating: 0, count: 32 * 32)
     private var wetTex: MTLTexture?
     private var wetProp: SCNMaterialProperty?
-    private var wetBuf: [UInt8]
     private var reflectionCG: CGImage?
     private var wetDirty = false
 
@@ -77,7 +89,7 @@ final class PaintCanvas {
 
             // wet-paint look: sheen masked by paint alpha; the scanned
             // reflection mirrors on FRESH paint (95%) and fades to 30% as it
-            // dries over ~5 s (driven by the wetMap texture)
+            // dries (driven by the wetMap texture, 25 s after release)
             let m = SCNMaterial()
             m.lightingModel = .blinn
             m.diffuse.contents = tex
@@ -122,14 +134,16 @@ final class PaintCanvas {
         self.parent = parent
         tilesPerSide = Int((surfaceMeters / PaintCanvas.tileMeters).rounded())
         sizePx = CGFloat(tilesPerSide) * CGFloat(PaintCanvas.tilePx)
-        wet = .init(repeating: 0, count: wetN * wetN)
-        wetBuf = .init(repeating: 0, count: wetN * wetN)
+        let n = PaintCanvas.wetN
+        wet = .init(repeating: 0, count: n * n)
+        pinned = .init(repeating: false, count: n * n)
         let wd = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .r8Unorm, width: wetN, height: wetN, mipmapped: false)
+            pixelFormat: .r8Unorm, width: n, height: n, mipmapped: false)
         wd.usage = [.shaderRead]
         if let wt = device.makeTexture(descriptor: wd) {
-            wt.replace(region: MTLRegionMake2D(0, 0, wetN, wetN),
-                       mipmapLevel: 0, withBytes: wetBuf, bytesPerRow: wetN)
+            let zero = [UInt8](repeating: 0, count: n * n)
+            wt.replace(region: MTLRegionMake2D(0, 0, n, n),
+                       mipmapLevel: 0, withBytes: zero, bytesPerRow: n)
             wetTex = wt
             wetProp = SCNMaterialProperty(contents: wt)
         }
@@ -145,27 +159,93 @@ final class PaintCanvas {
         }
     }
 
-    /// Mark a canvas-space region as freshly wet (called from drawing ops).
-    private func wetten(_ x: CGFloat, _ y: CGFloat, _ r: CGFloat) {
-        let s = CGFloat(wetN) / sizePx
-        let gx0 = max(0, Int((x - r) * s)), gx1 = min(wetN - 1, Int((x + r) * s))
-        let gy0 = max(0, Int((y - r) * s)), gy1 = min(wetN - 1, Int((y + r) * s))
+    /// Mark a soft wet disc, canvas px. Falloff is computed from the float
+    /// centre — no grid snapping — so the sheen never shows a square edge.
+    /// Callers own the footprint: the spray passes its real landing radius,
+    /// drips their stroke width. Overshoot is harmless (the shader masks
+    /// wetness by paint alpha) but keep it honest or old strokes re-wet.
+    func wetten(_ x: CGFloat, _ y: CGFloat, _ r: CGFloat) {
+        let n = PaintCanvas.wetN
+        let s = CGFloat(n) / sizePx
+        let cx = x * s, cy = y * s
+        let cr = max(r * s, 0.75)           // thin drips still register a cell
+        let gx0 = max(0, Int(cx - cr)), gx1 = min(n - 1, Int(cx + cr))
+        let gy0 = max(0, Int(cy - cr)), gy1 = min(n - 1, Int(cy + cr))
         guard gx0 <= gx1, gy0 <= gy1 else { return }
-        for gy in gy0...gy1 { for gx in gx0...gx1 { wet[gy * wetN + gx] = 1 } }
+        let inv = 1 / (cr * cr)
+        for gy in gy0...gy1 {
+            let dy = (CGFloat(gy) + 0.5) - cy
+            for gx in gx0...gx1 {
+                let dx = (CGFloat(gx) + 0.5) - cx
+                let d2 = (dx * dx + dy * dy) * inv
+                guard d2 < 1 else { continue }
+                let q = 1 - d2
+                let k = Float(q * q)                    // 1 centre → 0 rim
+                let idx = gy * n + gx
+                if k > wet[idx] { wet[idx] = k }
+                if stroking, !pinned[idx] { pinned[idx] = true; pinnedIdx.append(idx) }
+            }
+        }
+        for by in (gy0 >> 5)...(gy1 >> 5) {
+            for bx in (gx0 >> 5)...(gx1 >> 5) { liveBlocks.insert(by * blockN + bx) }
+        }
         wetDirty = true
     }
 
-    /// Decay wetness toward dry (~5 s) and upload the map once per frame.
-    func stepWet(dt: Double) {
-        let dec = Float(dt / 5.0)
-        var changed = wetDirty
-        for i in 0..<wet.count where wet[i] > 0 {
-            wet[i] = max(0, wet[i] - dec); changed = true
+    /// Trigger edge from the AR view. Release unpins the whole stroke so it
+    /// starts drying as one piece — the start of a long line stays as glossy
+    /// as its end until you let go.
+    func setStroking(_ on: Bool) {
+        guard stroking != on else { return }
+        stroking = on
+        if !on {
+            for i in pinnedIdx { pinned[i] = false }
+            pinnedIdx.removeAll(keepingCapacity: true)
         }
-        guard changed, let wt = wetTex else { wetDirty = false; return }
-        for i in 0..<wet.count { wetBuf[i] = UInt8(wet[i] * 255) }
-        wt.replace(region: MTLRegionMake2D(0, 0, wetN, wetN),
-                   mipmapLevel: 0, withBytes: wetBuf, bytesPerRow: wetN)
+    }
+
+    /// Decay unpinned wetness toward dry and upload what changed — walking
+    /// and uploading live blocks only, never the whole million-cell grid.
+    func stepWet(dt: Double) {
+        guard !liveBlocks.isEmpty else { wetDirty = false; return }
+        let n = PaintCanvas.wetN
+        let dec = Float(dt / PaintCanvas.dryEndSeconds)
+        var changed = wetDirty
+        var dead: [Int] = []
+        for b in liveBlocks {
+            let bx = (b % blockN) << 5, by = (b / blockN) << 5
+            var alive = false
+            for gy in by..<(by + 32) {
+                let row = gy * n
+                for gx in bx..<(bx + 32) {
+                    let i = row + gx
+                    if pinned[i] { alive = true; continue }
+                    let v = wet[i]
+                    if v > 0 {
+                        wet[i] = max(0, v - dec)
+                        changed = true
+                        if wet[i] > 0 { alive = true }
+                    }
+                }
+            }
+            if !alive { dead.append(b) }
+        }
+        if changed, let wt = wetTex {
+            // dead blocks upload their final zeros before they are culled
+            for b in liveBlocks {
+                let bx = (b % blockN) << 5, by = (b / blockN) << 5
+                var o = 0
+                for gy in by..<(by + 32) {
+                    let row = gy * n
+                    for gx in bx..<(bx + 32) {
+                        blockStage[o] = UInt8(wet[row + gx] * 255); o += 1
+                    }
+                }
+                wt.replace(region: MTLRegionMake2D(bx, by, 32, 32),
+                           mipmapLevel: 0, withBytes: blockStage, bytesPerRow: 32)
+            }
+        }
+        for b in dead { liveBlocks.remove(b) }
         wetDirty = false
     }
 
@@ -219,7 +299,6 @@ final class PaintCanvas {
     // MARK: draw primitives (surface-px coordinates)
 
     func fillDot(_ x: CGFloat, _ y: CGFloat, _ r: CGFloat, _ color: CGColor, _ alpha: CGFloat = 1) {
-        wetten(x, y, r)
         let rect = CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2)
         withTiles(rect) { t, ox, oy in
             t.ctx.setFillColor(color)
@@ -230,7 +309,6 @@ final class PaintCanvas {
     }
 
     func strokeSeg(from: CGPoint, to: CGPoint, width: CGFloat, color: CGColor) {
-        wetten((from.x + to.x) / 2, (from.y + to.y) / 2, max(width, hypot(to.x - from.x, to.y - from.y)))
         let pad = width + 2
         let rect = CGRect(x: min(from.x, to.x) - pad, y: min(from.y, to.y) - pad,
                           width: abs(to.x - from.x) + pad * 2,
@@ -246,7 +324,6 @@ final class PaintCanvas {
     }
 
     func fillBlob(_ x: CGFloat, _ y: CGFloat, _ rw: CGFloat, _ rh: CGFloat, _ color: CGColor) {
-        wetten(x, y, max(rw, rh))
         let rect = CGRect(x: x - rw, y: y - rh, width: rw * 2, height: rh * 2)
         withTiles(rect) { t, ox, oy in
             t.ctx.setFillColor(color)
@@ -332,6 +409,18 @@ final class PaintCanvas {
             t.dirty = nil
             t.mipsDirty = true
         }
+        // a cleared wall is a dry wall — zero the live blocks and let stepWet
+        // upload the zeros and cull them
+        for i in pinnedIdx { pinned[i] = false }
+        pinnedIdx.removeAll(keepingCapacity: true)
+        for b in liveBlocks {
+            let bx = (b % blockN) << 5, by = (b / blockN) << 5
+            for gy in by..<(by + 32) {
+                let row = gy * PaintCanvas.wetN
+                for gx in bx..<(bx + 32) { wet[row + gx] = 0 }
+            }
+        }
+        wetDirty = !liveBlocks.isEmpty
         contentRect = nil
         regenerateMips()
     }

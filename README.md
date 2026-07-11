@@ -1,107 +1,168 @@
-# OVERSPRAY — native iOS AR spray paint
+# Overspray
 
-Spray paint on real walls in AR. ARKit world tracking (camera + gyroscope
-fusion — the stable tracking), automatic vertical-plane detection (paint
-attaches straight to the detected wall, no manual wall placement), real
-metric distances driving spray size / density / drips, volume-button
-spraying, and in-app recording (camera + paint, no UI) saved to Photos.
+**Native iOS augmented-reality spray paint.** Point your iPhone at a real wall
+and paint it — with real spray-can physics, metric distances, drips, and
+in-app video recording.
 
-Works on all ARKit iPhones — no LiDAR needed. Plane detection runs on the
-rear camera.
-
-## How to use the app
-
-1. Open it and sweep the phone slowly across a wall. Yellow feature dots =
-   scanning. When ARKit finds the wall you get "Wall found".
-2. Aim the crosshair at the wall and hold the on-screen cap **or hold
-   volume-down** to spray. Walk closer/further — it's real tracking.
-3. Bottom-left: black/white + three nozzle caps (skinny / standard / fat).
-4. Record button top-left: captures camera + paint (no buttons) and saves
-   to Photos when stopped.
-
-Tip: like all ARKit apps, it wants a wall with some visual texture and
-decent light. A featureless white wall in dim light scans slowly.
+> **Version: Alpha 11.0** — pre-release. Expect rough edges; see
+> [Known limitations](#known-limitations).
 
 ---
 
-## Building it — your situation: 2014 Mac, no Xcode
+## Overview
 
-A 2014 Mac officially maxes out at macOS Big Sur → Xcode 13.2, which
-**cannot install apps onto iPhones running iOS 17+** (Apple requires
-Xcode 15+ for modern iPhones). Two working routes:
+Overspray turns any wall around you into a canvas. It uses ARKit world
+tracking (camera + gyroscope fusion) with automatic vertical-plane detection,
+so paint attaches directly to the detected wall and stays there — you can walk
+away, come back, and your piece is still on the wall where you left it.
 
-### Route A — upgrade the 2014 Mac (best if you'll keep iterating)
+Distance is real and metric: step closer and the spray tightens and gets
+denser, step back and it widens and fades — exactly like a physical can. Stand
+too close for too long and it drips.
 
-1. Install **OpenCore Legacy Patcher** (free, well-documented:
-   dortania.github.io/OpenCore-Legacy-Patcher) and use it to install
-   macOS Sonoma on the 2014 Mac. Back up first. This is a common,
-   well-supported path for 2014 MacBooks/iMacs.
-2. Install **Xcode** from the Mac App Store (large download; the old Mac
-   will be slow but it works — 8 GB RAM minimum, ~50 GB free disk).
-3. Install XcodeGen: `brew install xcodegen`, then in this folder run
-   `xcodegen generate` and open `Overspray.xcodeproj`.
-   (No Homebrew? You can instead make a new empty iOS App project in
-   Xcode named Overspray, delete its template files, and drag the
-   `Sources` folder in — then add the three Info.plist privacy keys
-   listed in project.yml.)
-4. In Xcode: select the Overspray target → Signing & Capabilities → set
-   Team to your (free) Apple ID → change the bundle id to something
-   unique like `com.yourname.overspray`.
-5. On the iPhone: Settings → Privacy & Security → **Developer Mode** → on
-   (restarts the phone).
-6. Plug in the phone, pick it as the run destination, press Run. First
-   launch: Settings → General → VPN & Device Management → trust your
-   developer certificate.
-7. Free-account apps expire after **7 days** — just press Run again to
-   refresh.
+Works on **all ARKit-capable iPhones** — no LiDAR required. Requires iOS 16+.
 
-### Route B — keep the Mac as it is, build in the cloud
+## Features
 
-GitHub compiles the app for free on their Mac servers; you install the
-result from your Big Sur Mac with Sideloadly.
+### Painting
+- **Real spray physics** — spray cone, droplet scatter, splatter, and paint
+  buildup all driven by the true metric distance between phone and wall
+- **Drips** — linger close to the wall and paint accumulates until it runs,
+  wobbles, and ends in a blob, pulled by real-world gravity regardless of how
+  the wall is oriented
+- **Can pressure** — output fades the longer you spray; physically shake the
+  phone to restore pressure. A freshly shaken can spatters and drips more
+- **Wet paint that dries** — fresh paint carries a glossy sheen (optionally
+  mirroring a scanned snapshot of the room) and dries to matte over ~25
+  seconds. A stroke stays fully wet until you release the trigger, then dries
+  as one piece
+- **Six caps** — fine dot, ring (Cyclops), standard (Beef), chisel bar that
+  rotates with the phone, a "dirty" fire-extinguisher blast, and a
+  **user-drawn custom cap** with live tuning sliders
+- **Pressure boost** (×1 / ×5 / ×10) and a motorised **dotted-line mode**
+- **Color** — black and white by default; long-press a swatch to pick any
+  color from the camera image
 
-1. Make a free GitHub account, create a new repository, upload this whole
-   folder (including the hidden `.github` folder).
-2. The included workflow runs automatically (Actions tab). When it
-   finishes, download the `Overspray-unsigned-ipa` artifact and unzip it
-   to get `Overspray-unsigned.ipa`.
-3. On the 2014 Mac install **Sideloadly** (sideloadly.io — runs fine on
-   Big Sur). Connect the iPhone, drag the IPA in, sign in with a free
-   Apple ID, press Start.
-4. Same as above: enable Developer Mode, trust the certificate in
-   Settings. Re-sideload every 7 days (Sideloadly remembers everything —
-   it's two clicks).
+### The wall
+- **One deliberate wall** — plane detection helps you aim, but *you* designate
+  the wall (tap flat spots, then *Set Wall*). Painting raycasts against that
+  frozen plane, so ARKit re-fitting its anchors can never fragment, move, or
+  delete your paint
+- **Lasso editing** — extend or cut the paintable area Photoshop-style: start
+  a stroke inside the area to add, outside to cut
+- **Depth nudge** — slide the wall along its normal for fine alignment
+- **High resolution** — the canvas resolves 4096 pixels per metre, allocated
+  lazily in tiles so memory is only spent where paint actually lands
 
-### Notes
+### Capture
+- **In-app recording** — camera + paint at 30 fps, without the UI, saved
+  straight to Photos. The microphone records ambient sound on its own capture
+  session, so starting a recording never disturbs the AR camera
+- **PNG export** — full-resolution composite of everything painted, on a
+  transparent background, via the share sheet
 
-- The volume-button spray uses Apple's camera-button API on iOS 17.2+
-  plus a classic volume-observation fallback. If a future iOS build
-  changes behaviour, the on-screen cap always works.
-- Recording captures the AR view (camera + paint) at 30 fps without the
-  UI, and saves to Photos on stop.
-- Every detected wall gets its own 4 m × 4 m paint canvas glued to it —
-  you can paint several walls in one session. "Clear wall" clears all.
+### Controls
+- **Volume buttons as triggers** — hold volume-down to spray black, volume-up
+  to spray white (uses the iOS 17.2+ camera-button API with a classic
+  volume-observation fallback; the on-screen cap always works)
+- **Sound** — looping spray hiss and shake rattle with multiple randomised
+  variants, plus a fading echo tail when you stop shaking (see
+  [Custom sounds](#custom-sounds))
+- Flashlight toggle for dark walls
 
-## Sounds (optional)
+## How to use it
 
-Drop your MP3s straight into the `Sources` folder next to the Swift files:
+1. **Scan** — open the app and sweep the phone slowly across a wall. Yellow
+   feature dots mean it is scanning; textured walls in decent light scan
+   fastest.
+2. **Set the wall** — tap three or more flat spots on the wall, then tap
+   **Set Wall**. The plane is now yours.
+3. **Spray** — aim the crosshair and hold the on-screen cap or a volume
+   button. Walk closer or further; it is real tracking.
+4. **Switch caps and colors** at the bottom-left. Long-press a swatch to
+   sample a color from the camera.
+5. **Record** — top-left button captures camera + paint (no UI) and saves to
+   Photos when stopped.
+6. **Reshape** — use the lasso to grow or cut the paintable area; **Clear**
+   wipes the paint.
 
-- `spray_01.mp3`, `spray_02.mp3`, `spray_03.mp3` (or a single `spray.mp3`)
-  — a random one loops while you hold the cap or volume-down
-- `shake_01.mp3`, `shake_02.mp3`, `shake_03.mp3` (or `shake.mp3`)
-  — a random one plays when you physically shake the phone (works
-  mid-spray too)
+## Building
 
-A different variant is picked each time so it never sounds looped/fake.
-Missing files are fine — the app simply stays silent.
+There is no Xcode project checked in — it is generated from `project.yml`
+with [XcodeGen](https://github.com/yonaskolb/XcodeGen).
 
-## Recording with sound
+### Option A — build locally (Mac with Xcode 15+)
 
-Recordings now include the microphone (ambient room sound). The mic only
-switches on while you're recording; iOS will ask permission the first
-time you press record.
+```bash
+brew install xcodegen
+xcodegen generate
+open Overspray.xcodeproj
+```
 
-### More optional sounds
+Then in Xcode: select the *Overspray* target → *Signing & Capabilities* → set
+your team and a unique bundle identifier → run on a device. On the iPhone,
+enable *Settings → Privacy & Security → Developer Mode*, and trust your
+certificate under *Settings → General → VPN & Device Management* on first
+launch.
 
-- `shake_echo_01.mp3`…`03` (or `shake_echo.mp3`): a fading rattle tail
-  played automatically when you STOP shaking, so it never cuts off flat.
+With a free Apple ID the install expires after **7 days** — press Run again
+to refresh.
+
+### Option B — build in the cloud, no modern Mac required
+
+The repository includes a GitHub Actions workflow
+(`.github/workflows/build.yml`) that compiles an **unsigned IPA** on every
+push:
+
+1. Push this repository to GitHub and open the *Actions* tab.
+2. Download the `Overspray-unsigned-ipa` artifact from the finished run.
+3. Sign and install it with [Sideloadly](https://sideloadly.io) (runs on
+   macOS back to Big Sur, and on Windows): connect the iPhone, drag the IPA
+   in, sign in with a free Apple ID, press *Start*.
+4. Enable Developer Mode and trust the certificate as above. Re-sideload
+   every 7 days — Sideloadly remembers the setup.
+
+## Custom sounds
+
+Drop MP3s into `Sources/` next to the Swift files; missing files simply mean
+silence. A random variant is chosen each time so nothing sounds looped:
+
+| Files | Played when |
+|---|---|
+| `spray_01.mp3` … `spray_03.mp3` (or `spray.mp3`) | loops while spraying |
+| `shake_01.mp3` … `shake_03.mp3` (or `shake.mp3`) | the phone is physically shaken |
+| `shake_echo_01.mp3` … `shake_echo_03.mp3` (or `shake_echo.mp3`) | shaking stops — a fading rattle tail |
+
+## Project structure
+
+```
+Sources/
+  OversprayApp.swift   app entry; SprayCap and the shared PaintState
+  ARSprayView.swift    AR session, wall designation, per-frame loop, PaintSurface
+  PaintCanvas.swift    tiled GPU-backed canvas, wet/dry map, PNG export
+  SprayEngine.swift    spray, pressure, and drip physics
+  Recorder.swift       in-app video recording; volume-button trigger
+  SoundKit.swift       can sounds and shake detection
+  ContentView.swift    SwiftUI control overlay
+docs/                  architecture, working rules, and change specs
+project.yml            XcodeGen project definition
+```
+
+Development process, evaluation criteria, and per-change specifications live
+in [`docs/`](docs/).
+
+## Known limitations
+
+- **Painted area is capped at roughly 4 m²** per session (a fixed tile
+  budget); paint stops appearing past the cap. Raising it is planned work —
+  see `docs/specs/`.
+- Free-Apple-ID installs expire after 7 days and must be re-sideloaded.
+- Colors picked from the camera are session-only; restarting the app resets
+  the palette.
+- Like all ARKit apps, featureless walls in dim light scan slowly.
+
+## Requirements
+
+- iPhone with ARKit support (A12 or newer recommended), iOS 16 or later
+- Camera, microphone (recording only), and Photos-add permissions
+- No LiDAR needed
