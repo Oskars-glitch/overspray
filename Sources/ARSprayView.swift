@@ -61,7 +61,10 @@ struct ARSprayView: UIViewRepresentable {
         private var firstHitTransform: simd_float4x4?
         private var lastNudge: Double = 0
         private var motionBlurSet = false
-        // spray mist — billboards in the scene, see MistField
+        // spray mist — billboards in the scene, see MistField. Parked by
+        // Oskars 2026-07-12 ("not necessary, though I kinda like it") —
+        // flip to true to bring it back, bands already retuned 5× faster
+        private let mistOn = false
         private let mist = MistField()
         private var viewCenter = CGPoint(x: UIScreen.main.bounds.midX,
                                          y: UIScreen.main.bounds.midY)
@@ -287,15 +290,17 @@ struct ARSprayView: UIViewRepresentable {
             wall?.engine?.stepDrips(dt: dt)
             wall?.engine?.flush(dt: dt)
 
-            var mistTarget: CGPoint?
-            if spraying, let sw = sprayWorld {
-                let sp = view.projectPoint(SCNVector3(sw.x, sw.y, sw.z))
-                if sp.z > 0, sp.z < 1 {
-                    mistTarget = CGPoint(x: CGFloat(sp.x), y: CGFloat(sp.y))
+            if mistOn {
+                var mistTarget: CGPoint?
+                if spraying, let sw = sprayWorld {
+                    let sp = view.projectPoint(SCNVector3(sw.x, sw.y, sw.z))
+                    if sp.z > 0, sp.z < 1 {
+                        mistTarget = CGPoint(x: CGFloat(sp.x), y: CGFloat(sp.y))
+                    }
                 }
+                mist.step(view: view, dt: dt, target: mistTarget,
+                          color: state.colors[state.colorIndex])
             }
-            mist.step(view: view, dt: dt, target: mistTarget,
-                      color: state.colors[state.colorIndex])
         }
 
         // MARK: wall points — tap the FLAT spots; the wall passes through them
@@ -1027,10 +1032,12 @@ final class MistField {
     private var spawnPhase = 0
 
     // near/fast/big → far/slow/small: (life s, chase, rise pt/s, size m, alpha)
+    // 5× faster than v1 per Oskars — the old speed lagged far behind how fast
+    // paint lands on the wall
     private let bands: [(Double, CGFloat, CGFloat, CGFloat, CGFloat)] = [
-        (0.38, 9.0, 260, 0.052, 0.30),
-        (0.55, 6.0, 200, 0.036, 0.22),
-        (0.75, 4.0, 150, 0.024, 0.15),
+        (0.08, 45.0, 1300, 0.052, 0.30),
+        (0.11, 30.0, 1000, 0.036, 0.22),
+        (0.15, 20.0,  750, 0.024, 0.15),
     ]
 
     /// Call once per frame from the render tick. `target` non-nil = spraying.

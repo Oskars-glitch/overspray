@@ -4,7 +4,7 @@
 and paint it — with real spray-can physics, metric distances, drips, and
 in-app video recording.
 
-> **Version: Alpha 11.0** — pre-release. Expect rough edges; see
+> **Version: Alpha 11.3** — pre-release. Expect rough edges; see
 > [Known limitations](#known-limitations).
 
 ---
@@ -50,8 +50,11 @@ Works on **all ARKit-capable iPhones** — no LiDAR required. Requires iOS 16+.
   the wall (tap flat spots, then *Set Wall*). Painting raycasts against that
   frozen plane, so ARKit re-fitting its anchors can never fragment, move, or
   delete your paint
-- **Lasso editing** — extend or cut the paintable area Photoshop-style: start
-  a stroke inside the area to add, outside to cut
+- **Lasso editing** — five tools in edit mode: extend (`+`) or cut (`−`) the
+  paintable area Photoshop-style, or lasso a **wall material** onto a region
+- **Wall materials** — glossy (default), rough (matte, duller sheen), and
+  bumpy (a subtle stone-like light break). Rough surfaces take the spray with
+  slightly wider scatter; coverage is never reduced
 - **Depth nudge** — slide the wall along its normal for fine alignment
 - **High resolution** — the canvas resolves 4096 pixels per metre, allocated
   lazily in tiles so memory is only spent where paint actually lands

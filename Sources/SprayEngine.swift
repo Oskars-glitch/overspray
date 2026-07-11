@@ -168,18 +168,8 @@ final class SprayEngine {
         @inline(__always) func placeWorld(_ offx: CGFloat, _ offy: CGFloat) -> CGPoint {
             place(offx * sd.dx + offy * sd.dy, -offx * sd.dy + offy * sd.dx)
         }
-        // bumpy wall: a fixed spatial hash rejects droplets in the "valleys" —
-        // the SAME cells stay open on every pass, so respraying reads as
-        // surface texture, not random noise
-        let bumpyWall = materialAt(c) == 2
-        @inline(__always) func speckleOK(_ p: CGPoint) -> Bool {
-            guard bumpyWall else { return true }
-            let gx = (p.x / 33).rounded(.down), gy = (p.y / 33).rounded(.down)
-            let h = sin(gx * 12.9898 + gy * 78.233) * 43758.5453
-            return h - h.rounded(.down) > 0.38
-        }
         @inline(__always) func dot(_ p: CGPoint, _ r: CGFloat) {
-            if allowed(p), speckleOK(p) { canvas.fillDot(p.x, p.y, r, color) }
+            if allowed(p) { canvas.fillDot(p.x, p.y, r, color) }
         }
 
         // pressure boost ×1/×5/×10: split between MORE dots and BIGGER dots
@@ -187,10 +177,13 @@ final class SprayEngine {
         let cMul = min(boost, 4)
         let sMul = sqrt(boost / cMul)
 
-        // freshly shaken can: looser cone, more paint, for a few seconds
+        // freshly shaken can: looser cone, more paint, for a few seconds.
+        // rough/bumpy wall grips unevenly: same coverage, slightly wider
+        // scatter — the wall is fully paintable, it just takes paint rougher
         let ch = min(charge, 2.5)
+        let matGrip: CGFloat = materialAt(c) > 0 ? 1.15 : 1.0
         let close = min(1, max(0, (0.85 - d) / 0.85))
-        let sigma = R * (0.30 + 0.50 * (1 - close)) * cap.scatterScale * (1 + 0.18 * ch)
+        let sigma = R * (0.30 + 0.50 * (1 - close)) * cap.scatterScale * (1 + 0.18 * ch) * matGrip
         let fineFade = cap.dotScale < 0.3 ? pow(close, 0.7) : 1.0
         var count = Int((60 + 240 * close) * k * 5 * cap.countScale * fineFade * pressure * cMul
                         * (1 + 0.35 * ch))
