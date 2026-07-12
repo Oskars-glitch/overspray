@@ -4,7 +4,7 @@
 and paint it — with real spray-can physics, metric distances, drips, and
 in-app video recording.
 
-> **Version: Alpha 11.6** — pre-release. Expect rough edges; see
+> **Version: Alpha 11.7** — pre-release. Expect rough edges; see
 > [Known limitations](#known-limitations).
 
 ---

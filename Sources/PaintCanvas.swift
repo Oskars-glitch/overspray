@@ -32,10 +32,12 @@ final class PaintCanvas {
     // wetness map: one grid over the whole surface. 1 = just sprayed (fully
     // reflective), fading to 0 (dry, dim reflection). Cells touched while the
     // trigger is held are PINNED fully wet — the whole stroke starts drying
-    // together on release, never while it is still being painted. 1024 cells
-    // = 1.2 cm at 12 m, and wetten() writes soft discs from the float centre,
-    // so no cell edge ever shows as a square.
-    static let wetN = 1024                  // grid cells per side (1.2 cm)
+    // together on release, never while it is still being painted. 2048 cells
+    // = 6 mm at 12 m, wetten() writes soft discs from the float centre, and
+    // the sampler is linear — gradients, not steps. (The reflection itself is
+    // masked by the paint alpha at full 4096 px/m: every splatter dot carries
+    // its own sheen; this grid only says how WET each spot is.)
+    static let wetN = 2048                  // grid cells per side (6 mm)
     static let dryEndSeconds = 25.0         // trigger release → fully matte
     static let matN = 1800                  // mask + material lattice (0.67 cm cells)
     private var wet: [Float]

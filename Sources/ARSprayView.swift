@@ -563,9 +563,9 @@ struct ARSprayView: UIViewRepresentable {
             let ci = CIImage(cvPixelBuffer: buf)
             // downscale hard + blur → the low-res, dreamy reflection you asked for
             let ctx = CIContext()
-            // 880 px + σ0.8: softly sharp base image; mips on the reflective
-            // sampler supply the distance blur
-            let scale: CGFloat = 880 / max(ci.extent.width, ci.extent.height)
+            // 220 px + σ0.8: dreamy, unmistakably a reflection — 880 px read
+            // as a literal mirror on the wall. Mips still blur with distance.
+            let scale: CGFloat = 220 / max(ci.extent.width, ci.extent.height)
             let small = ci.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
             let blurred = small.applyingGaussianBlur(sigma: 0.8).clamped(to: small.extent)
             guard let cg = ctx.createCGImage(blurred, from: small.extent) else {
