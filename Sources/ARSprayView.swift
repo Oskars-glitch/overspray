@@ -148,7 +148,8 @@ struct ARSprayView: UIViewRepresentable {
 
             if !motionBlurSet, let cam = arView?.pointOfView?.camera {
                 motionBlurSet = true
-                cam.motionBlurIntensity = 0.6   // paint smears on fast pans
+                cam.motionBlurIntensity = 1.0   // paint smears on fast pans
+                cam.wantsDepthOfField = false   // pinned off — DOF flickers on grain
             }
 
             guard let view = arView, let frame = view.session.currentFrame else { return }
@@ -563,12 +564,11 @@ struct ARSprayView: UIViewRepresentable {
             let ci = CIImage(cvPixelBuffer: buf)
             // downscale hard + blur → the low-res, dreamy reflection you asked for
             let ctx = CIContext()
-            // 220 px + σ0.8: dreamy, unmistakably a reflection — 880 px read
-            // as a literal mirror on the wall. Mips still blur with distance.
-            let scale: CGFloat = 220 / max(ci.extent.width, ci.extent.height)
+            // 160 px, no gaussian: the downscale + texture filtering supply
+            // all the blur needed, and skipping the blur pass saves memory
+            let scale: CGFloat = 160 / max(ci.extent.width, ci.extent.height)
             let small = ci.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-            let blurred = small.applyingGaussianBlur(sigma: 0.8).clamped(to: small.extent)
-            guard let cg = ctx.createCGImage(blurred, from: small.extent) else {
+            guard let cg = ctx.createCGImage(small, from: small.extent) else {
                 state.showToast("Reflection scan failed — try again")
                 return
             }
@@ -671,7 +671,8 @@ final class PaintSurface {
         node.eulerAngles.x = -.pi / 2
         rootNode.addChildNode(node)
         maskBits = .init(repeating: 0, count: PaintSurface.maskN * PaintSurface.maskWords)
-        mat = .init(repeating: 0, count: PaintCanvas.matN * PaintCanvas.matN)
+        // walls default to ROUGH (matte) — glossy is the opt-in, per Oskars
+        mat = .init(repeating: 1, count: PaintCanvas.matN * PaintCanvas.matN)
 
         let downLocal = transform.inverse * simd_float4(0, -1, 0, 0)
         dripDirLocal = CGVector(dx: CGFloat(downLocal.x), dy: CGFloat(downLocal.z))

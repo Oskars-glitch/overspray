@@ -241,8 +241,8 @@ struct EditToolButton: View {
             switch tool {
             case .add:    state.showToast("Lasso adds paintable area")
             case .cut:    state.showToast("Lasso cuts — nothing lands there")
-            case .glossy: state.showToast("Material: glossy (default)")
-            case .rough:  state.showToast("Material: rough — matte sheen")
+            case .glossy: state.showToast("Material: glossy — shiny")
+            case .rough:  state.showToast("Material: rough — matte (default)")
             case .bumpy:  state.showToast("Material: bumpy — breaks the paint")
             }
         }) {

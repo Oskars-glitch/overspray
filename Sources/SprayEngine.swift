@@ -178,10 +178,11 @@ final class SprayEngine {
         let sMul = sqrt(boost / cMul)
 
         // freshly shaken can: looser cone, more paint, for a few seconds.
-        // rough/bumpy wall grips unevenly: same coverage, slightly wider
-        // scatter — the wall is fully paintable, it just takes paint rougher
+        // bumpy wall grips unevenly: same coverage, slightly wider scatter.
+        // (Rough is the DEFAULT surface now, so it no longer widens the
+        // spray — only real texture does.)
         let ch = min(charge, 2.5)
-        let matGrip: CGFloat = materialAt(c) > 0 ? 1.15 : 1.0
+        let matGrip: CGFloat = materialAt(c) == 2 ? 1.15 : 1.0
         let close = min(1, max(0, (0.85 - d) / 0.85))
         let sigma = R * (0.30 + 0.50 * (1 - close)) * cap.scatterScale * (1 + 0.18 * ch) * matGrip
         let fineFade = cap.dotScale < 0.3 ? pow(close, 0.7) : 1.0

@@ -31,8 +31,8 @@ struct SprayCap {
 enum EditTool {
     case add      // grow the paintable area
     case cut      // remove from it (nothing may land there — not wall)
-    case glossy   // the default surface — today's look
-    case rough    // matte: dimmer, wider, duller sheen
+    case glossy   // shiny surface — opt-in
+    case rough    // matte: dimmer, wider, duller sheen — the DEFAULT
     case bumpy    // rough + micro-normals + paint misses the valleys
 }
 

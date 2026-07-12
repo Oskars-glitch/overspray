@@ -103,7 +103,11 @@ final class PaintCanvas {
             m.lightingModel = .blinn
             m.diffuse.contents = tex
             m.diffuse.mipFilter = .linear
-            m.diffuse.maxAnisotropy = 4
+            // anisotropy 1, deliberately: aniso keeps fine spray grain sharp
+            // at distance and grazing angles, and sub-pixel grain SHIMMERS.
+            // Plain trilinear blurs gradually with distance instead — the
+            // slight far softness is wanted (matches what the camera sees)
+            m.diffuse.maxAnisotropy = 1
             m.specular.contents = UIColor(white: 0.23, alpha: 1)
             m.shininess = 24
             m.isDoubleSided = false
@@ -161,8 +165,11 @@ final class PaintCanvas {
                 // spot); dry paint gets only the mild boost
                 float torchSharp = 1.0 + torchBoost * (1.5 + 14.5 * wet);
                 _surface.shininess = (4.0 + 70.0 * near * near) * (1.0 - 0.75 * rough) * torchSharp;
-                _surface.specular.rgb = _surface.specular.rgb * _surface.diffuse.a * (0.35 + 0.65 * near) * (0.6 + 0.4 * wet) * (1.0 - 0.45 * rough) * (1.0 + (0.6 + 1.2 * wet) * torchBoost);
-                float refK = (0.20 + 0.78 * wet) * (1.0 + 0.5 * torchBoost) * (1.0 - 0.55 * rough);
+                // dry paint is near-pure diffuse so the sprayed colour matches
+                // the picked colour exactly — the old dry sheen greyed blacks
+                // and dimmed whites. Wet keeps the full effect.
+                _surface.specular.rgb = _surface.specular.rgb * _surface.diffuse.a * (0.35 + 0.65 * near) * (0.12 + 0.88 * wet) * (1.0 - 0.45 * rough) * (1.0 + (0.6 + 1.2 * wet) * torchBoost);
+                float refK = (0.05 + 0.83 * wet) * (1.0 + 0.5 * torchBoost) * (1.0 - 0.55 * rough);
                 _surface.reflective.rgb = _surface.reflective.rgb * _surface.diffuse.a * min(refK, 1.0);
                 """
             ]
