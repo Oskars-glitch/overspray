@@ -63,6 +63,7 @@ final class PaintState: ObservableObject {
     @Published var torchOn = false
     @Published var editingPlane = false          // lasso edit mode
     @Published var editTool: EditTool = .add     // active lasso tool
+    @Published var mistOn = false                // spray mist, off by default
     @Published var wallSet = false               // has the user designated a wall?
     @Published var setPointCount = 0             // wall points placed so far
     @Published var wallNudge: Double = 0         // wall depth adjustment, metres

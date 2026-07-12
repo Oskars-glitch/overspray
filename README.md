@@ -4,7 +4,7 @@
 and paint it — with real spray-can physics, metric distances, drips, and
 in-app video recording.
 
-> **Version: Alpha 11.4** — pre-release. Expect rough edges; see
+> **Version: Alpha 11.5** — pre-release. Expect rough edges; see
 > [Known limitations](#known-limitations).
 
 ---
@@ -73,7 +73,11 @@ Works on **all ARKit-capable iPhones** — no LiDAR required. Requires iOS 16+.
 - **Sound** — looping spray hiss and shake rattle with multiple randomised
   variants, plus a fading echo tail when you stop shaking (see
   [Custom sounds](#custom-sounds))
-- Flashlight toggle for dark walls
+- **Spray mist** (optional, off by default) — faint puffs of the paint
+  colour rise from the can toward the point being painted, bending with
+  camera motion; sized to the active cap
+- Flashlight toggle for dark walls — on wet paint it throws a hard, bright
+  hotspot
 
 ## How to use it
 
@@ -129,22 +133,10 @@ push:
 
 ### How long the app stays on the phone
 
-The limit is Apple's signing policy, not the app:
-
-| Signing | App runs for | Cost |
-|---|---|---|
-| Free Apple ID (Sideloadly/Xcode) | **7 days**, then it stops launching until re-signed | free |
-| Apple Developer Program | **1 year** per install; TestFlight builds 90 days | $99/year |
-| App Store release | permanent | $99/year + App Review |
-
-Ways to make the 7-day cycle painless or remove it:
-
-- **AltStore / SideStore** can re-sign automatically in the background
-  whenever the phone shares Wi-Fi with a computer running AltServer — the
-  7-day limit still exists but you stop noticing it.
-- **A paid developer account** is the clean fix: sign with it in Sideloadly
-  and each install lasts a year.
-- Re-running Sideloadly manually is two clicks; it remembers everything.
+Sideloaded installs are re-signed periodically (7 days with a free Apple
+ID). Re-sideloading is two clicks — Sideloadly remembers everything — and
+**AltStore / SideStore** can re-sign automatically in the background
+whenever the phone shares Wi-Fi with the computer running AltServer.
 
 ## Custom sounds
 

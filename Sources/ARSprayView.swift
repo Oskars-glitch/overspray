@@ -61,10 +61,8 @@ struct ARSprayView: UIViewRepresentable {
         private var firstHitTransform: simd_float4x4?
         private var lastNudge: Double = 0
         private var motionBlurSet = false
-        // spray mist — billboards in the scene, see MistField. Parked by
-        // Oskars 2026-07-12 ("not necessary, though I kinda like it") —
-        // flip to true to bring it back, bands already retuned 5× faster
-        private let mistOn = false
+        // spray mist — billboards in the scene, see MistField. User-toggled
+        // (cloud button), off by default
         private let mist = MistField()
         private var viewCenter = CGPoint(x: UIScreen.main.bounds.midX,
                                          y: UIScreen.main.bounds.midY)
@@ -290,7 +288,7 @@ struct ARSprayView: UIViewRepresentable {
             wall?.engine?.stepDrips(dt: dt)
             wall?.engine?.flush(dt: dt)
 
-            if mistOn {
+            if state.mistOn {
                 var mistTarget: CGPoint?
                 if spraying, let sw = sprayWorld {
                     let sp = view.projectPoint(SCNVector3(sw.x, sw.y, sw.z))
@@ -298,7 +296,9 @@ struct ARSprayView: UIViewRepresentable {
                         mistTarget = CGPoint(x: CGFloat(sp.x), y: CGFloat(sp.y))
                     }
                 }
+                // plume tracks the cap: skinny cap = thin mist, fat = wide
                 mist.step(view: view, dt: dt, target: mistTarget,
+                          capScale: CGFloat(cap.deg / 13.0),
                           color: state.colors[state.colorIndex])
             }
         }
@@ -582,12 +582,11 @@ struct ARSprayView: UIViewRepresentable {
             let ci = CIImage(cvPixelBuffer: buf)
             // downscale hard + blur → the low-res, dreamy reflection you asked for
             let ctx = CIContext()
-            let scale: CGFloat = 220 / max(ci.extent.width, ci.extent.height)
+            // 880 px + σ0.4: near-sharp base image; mips on the reflective
+            // sampler supply the distance blur
+            let scale: CGFloat = 880 / max(ci.extent.width, ci.extent.height)
             let small = ci.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-            // σ1.2, not 2.5: mips on the reflective sampler now supply the
-            // distance blur, so close-up gets the sharper base image while
-            // far away stays as dreamy as before
-            let blurred = small.applyingGaussianBlur(sigma: 1.2).clamped(to: small.extent)
+            let blurred = small.applyingGaussianBlur(sigma: 0.4).clamped(to: small.extent)
             guard let cg = ctx.createCGImage(blurred, from: small.extent) else {
                 state.showToast("Reflection scan failed — try again")
                 return
@@ -660,7 +659,7 @@ final class PaintSurface {
     private let dripDirLocal: CGVector
     var canvasPx: CGFloat { PaintSurface.sizeMeters * PaintCanvas.ppm }
 
-    // paintable-area mask + wall-material grid, same 2 cm lattice
+    // paintable-area mask + wall-material grid, same 0.67 cm lattice
     private let maskN = PaintCanvas.matN
     private var mask: [Bool]
     private var mat: [UInt8]                     // 0 glossy · 1 rough · 2 bumpy
@@ -1033,16 +1032,20 @@ final class MistField {
 
     // near/fast/big → far/slow/small: (life s, chase, rise pt/s, size m, alpha)
     // 5× faster than v1 per Oskars — the old speed lagged far behind how fast
-    // paint lands on the wall
+    // paint lands on the wall. Alphas kept faint: mist should be felt, not seen.
     private let bands: [(Double, CGFloat, CGFloat, CGFloat, CGFloat)] = [
-        (0.08, 45.0, 1300, 0.052, 0.30),
-        (0.11, 30.0, 1000, 0.036, 0.22),
-        (0.15, 20.0,  750, 0.024, 0.15),
+        (0.08, 45.0, 1300, 0.052, 0.15),
+        (0.11, 30.0, 1000, 0.036, 0.11),
+        (0.15, 20.0,  750, 0.024, 0.08),
     ]
+    private var capScale: CGFloat = 1
 
     /// Call once per frame from the render tick. `target` non-nil = spraying.
-    func step(view: ARSCNView, dt: Double, target: CGPoint?, color: UIColor) {
+    /// `capScale` ~ cap cone vs Beef: the plume matches the cap's spray size.
+    func step(view: ARSCNView, dt: Double, target: CGPoint?,
+              capScale: CGFloat, color: UIColor) {
         guard let pov = view.pointOfView else { return }
+        self.capScale = min(1.5, max(0.3, capScale))
         if let target = target {
             retint(color)
             spawn(view: view, target: target)
@@ -1085,12 +1088,13 @@ final class MistField {
         let b = bands[spawnPhase]
         node.isHidden = false
         node.opacity = 0
+        let spread = 70 * capScale
         live.append(Puff(node: node,
-                         pos: CGPoint(x: target.x + CGFloat.random(in: -70...70),
+                         pos: CGPoint(x: target.x + CGFloat.random(in: -spread...spread),
                                       y: view.bounds.height + 20),
                          t: 0, life: b.0, chase: b.1,
                          rise: b.2 * CGFloat.random(in: 0.8...1.25),
-                         size: b.3 * CGFloat.random(in: 0.8...1.3),
+                         size: b.3 * CGFloat.random(in: 0.8...1.3) * capScale,
                          alpha: b.4,
                          drift: CGFloat.random(in: -30...30)))
     }
@@ -1140,9 +1144,10 @@ final class MistField {
                                   bitsPerComponent: 8, bytesPerRow: 0, space: cs,
                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
         else { return nil }
-        let colors = [UIColor(red: r, green: g, blue: b, alpha: 0.85).cgColor,
+        // faint core, early fade-out: gas haze toned right down — subtle
+        let colors = [UIColor(red: r, green: g, blue: b, alpha: 0.45).cgColor,
                       UIColor(red: r, green: g, blue: b, alpha: 0).cgColor] as CFArray
-        if let grad = CGGradient(colorsSpace: cs, colors: colors, locations: [0, 1]) {
+        if let grad = CGGradient(colorsSpace: cs, colors: colors, locations: [0, 0.7]) {
             ctx.drawRadialGradient(grad,
                                    startCenter: CGPoint(x: 32, y: 32), startRadius: 0,
                                    endCenter: CGPoint(x: 32, y: 32), endRadius: 32,

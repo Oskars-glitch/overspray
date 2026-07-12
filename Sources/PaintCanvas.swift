@@ -37,7 +37,7 @@ final class PaintCanvas {
     // so no cell edge ever shows as a square.
     static let wetN = 1024                  // grid cells per side (1.2 cm)
     static let dryEndSeconds = 25.0         // trigger release → fully matte
-    static let matN = 600                   // material grid, same lattice as the mask
+    static let matN = 1800                  // mask + material lattice (0.67 cm cells)
     private var wet: [Float]
     private var pinned: [Bool]              // wet-locked until trigger release
     private var pinnedIdx: [Int] = []       // what to unpin, without a grid walk
@@ -131,23 +131,35 @@ final class PaintCanvas {
                 float rough = clamp(mat, 0.0, 1.0);
                 float bumpy = clamp(mat - 1.0, 0.0, 1.0);
                 if (bumpy > 0.01) {
-                    // rough-stone micro-normals: layered irrational-ratio
-                    // sines so the pattern is cloudy, never a lattice, and a
-                    // SMALL amplitude — less is more. Distance-damped against
-                    // shimmer.
-                    float2 bp = wuv * 12500.0;
-                    float bx = sin(bp.x + sin(bp.y * 1.71 + 1.3)) + 0.5 * sin((bp.x + bp.y) * 0.37 + 4.1);
-                    float by = sin(bp.y * 0.89 + sin(bp.x * 1.29 + 2.6)) - 0.5 * sin((bp.x - bp.y) * 0.41 + 0.7);
+                    // rough-stone micro-normals from hash-based value noise —
+                    // genuinely aperiodic, no lattice, no carbon-fibre repeat.
+                    // ~6 mm grain, tiny amplitude, distance-damped.
+                    float2 bp = wuv * 2000.0;
+                    float2 ip = fmod(floor(bp), 787.0);
+                    float2 fp = fract(bp);
+                    float2 uu = fp * fp * (3.0 - 2.0 * fp);
+                    float h00 = fract(sin(dot(ip, float2(127.1, 311.7))) * 43758.5453);
+                    float h10 = fract(sin(dot(ip + float2(1.0, 0.0), float2(127.1, 311.7))) * 43758.5453);
+                    float h01 = fract(sin(dot(ip + float2(0.0, 1.0), float2(127.1, 311.7))) * 43758.5453);
+                    float h11 = fract(sin(dot(ip + float2(1.0, 1.0), float2(127.1, 311.7))) * 43758.5453);
+                    float bx = mix(mix(h00, h10, uu.x), mix(h01, h11, uu.x), uu.y) * 2.0 - 1.0;
+                    float g00 = fract(sin(dot(ip, float2(269.5, 183.3))) * 43758.5453);
+                    float g10 = fract(sin(dot(ip + float2(1.0, 0.0), float2(269.5, 183.3))) * 43758.5453);
+                    float g01 = fract(sin(dot(ip + float2(0.0, 1.0), float2(269.5, 183.3))) * 43758.5453);
+                    float g11 = fract(sin(dot(ip + float2(1.0, 1.0), float2(269.5, 183.3))) * 43758.5453);
+                    float by = mix(mix(g00, g10, uu.x), mix(g01, g11, uu.x), uu.y) * 2.0 - 1.0;
                     float3 bref = abs(_surface.normal.y) > 0.8 ? float3(1.0, 0.0, 0.0) : float3(0.0, 1.0, 0.0);
                     float3 bt = normalize(cross(_surface.normal, bref));
                     float3 bb = cross(_surface.normal, bt);
                     float amp = 0.012 * bumpy * (0.35 + 0.65 * near);
                     _surface.normal = normalize(_surface.normal + (bt * bx + bb * by) * amp);
                 }
-                // torch: brighter AND tighter — higher shininess shrinks and
-                // sharpens the highlight the flashlight throws on wet paint
-                _surface.shininess = (4.0 + 70.0 * near * near) * (1.0 - 0.75 * rough) * (1.0 + 1.2 * torchBoost);
-                _surface.specular.rgb = _surface.specular.rgb * _surface.diffuse.a * (0.35 + 0.65 * near) * (0.6 + 0.4 * wet) * (1.0 - 0.45 * rough) * (1.0 + 0.6 * torchBoost);
+                // torch: brighter AND tighter — on WET paint the highlight
+                // collapses to a hard hotspot (~16x exponent = ~4x smaller
+                // spot); dry paint gets only the mild boost
+                float torchSharp = 1.0 + torchBoost * (1.5 + 14.5 * wet);
+                _surface.shininess = (4.0 + 70.0 * near * near) * (1.0 - 0.75 * rough) * torchSharp;
+                _surface.specular.rgb = _surface.specular.rgb * _surface.diffuse.a * (0.35 + 0.65 * near) * (0.6 + 0.4 * wet) * (1.0 - 0.45 * rough) * (1.0 + (0.6 + 1.2 * wet) * torchBoost);
                 float refK = (0.20 + 0.78 * wet) * (1.0 + 0.5 * torchBoost) * (1.0 - 0.55 * rough);
                 _surface.reflective.rgb = _surface.reflective.rgb * _surface.diffuse.a * min(refK, 1.0);
                 """

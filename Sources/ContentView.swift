@@ -72,6 +72,16 @@ struct ContentView: View {
                                 .background(.ultraThinMaterial, in: Circle())
                         }
                     }
+                    Button(action: {
+                        state.mistOn.toggle()
+                        state.showToast(state.mistOn ? "Spray mist on" : "Spray mist off")
+                    }) {
+                        Image(systemName: state.mistOn ? "cloud.fog.fill" : "cloud.fog")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundColor(state.mistOn ? .orange : .white)
+                            .frame(width: 38, height: 38)
+                            .background(.ultraThinMaterial, in: Circle())
+                    }
                     Button(action: { state.torchOn.toggle() }) {
                         Image(systemName: state.torchOn ? "flashlight.on.fill" : "flashlight.off.fill")
                             .font(.system(size: 15, weight: .semibold))
