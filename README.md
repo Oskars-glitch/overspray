@@ -4,7 +4,7 @@
 and paint it — with real spray-can physics, metric distances, drips, and
 in-app video recording.
 
-> **Version: Alpha 11.5** — pre-release. Expect rough edges; see
+> **Version: Alpha 11.6** — pre-release. Expect rough edges; see
 > [Known limitations](#known-limitations).
 
 ---
@@ -73,9 +73,6 @@ Works on **all ARKit-capable iPhones** — no LiDAR required. Requires iOS 16+.
 - **Sound** — looping spray hiss and shake rattle with multiple randomised
   variants, plus a fading echo tail when you stop shaking (see
   [Custom sounds](#custom-sounds))
-- **Spray mist** (optional, off by default) — faint puffs of the paint
-  colour rise from the can toward the point being painted, bending with
-  camera motion; sized to the active cap
 - Flashlight toggle for dark walls — on wet paint it throws a hard, bright
   hotspot
 

@@ -61,9 +61,6 @@ struct ARSprayView: UIViewRepresentable {
         private var firstHitTransform: simd_float4x4?
         private var lastNudge: Double = 0
         private var motionBlurSet = false
-        // spray mist — billboards in the scene, see MistField. User-toggled
-        // (cloud button), off by default
-        private let mist = MistField()
         private var viewCenter = CGPoint(x: UIScreen.main.bounds.midX,
                                          y: UIScreen.main.bounds.midY)
         private let viewSize = UIScreen.main.bounds.size
@@ -197,14 +194,12 @@ struct ARSprayView: UIViewRepresentable {
             // painting hits OUR wall's infinite plane — steady, no strobing
             var hit: (tex: CGPoint, dist: Double, stretch: CGFloat,
                       sdir: CGVector, roll: CGVector)?
-            var sprayWorld: simd_float3?         // where paint lands — mist homes on it
             if let w = wall, let t = w.rayHit(origin: camPos, dir: camFwd), t < 8 {
                 let world = camPos + camFwd * t
                 if let tex = w.texturePoint(worldPoint: world) {
                     let (stretch, sdir) = w.obliqueness(rayDir: camFwd)
                     hit = (tex, Double(t), stretch, sdir,
                            w.rollDirection(cameraRight: camRight))
-                    sprayWorld = world
                 }
             }
 
@@ -287,20 +282,6 @@ struct ARSprayView: UIViewRepresentable {
             wall?.canvasRef()?.setStroking(spraying)
             wall?.engine?.stepDrips(dt: dt)
             wall?.engine?.flush(dt: dt)
-
-            if state.mistOn {
-                var mistTarget: CGPoint?
-                if spraying, let sw = sprayWorld {
-                    let sp = view.projectPoint(SCNVector3(sw.x, sw.y, sw.z))
-                    if sp.z > 0, sp.z < 1 {
-                        mistTarget = CGPoint(x: CGFloat(sp.x), y: CGFloat(sp.y))
-                    }
-                }
-                // plume tracks the cap: skinny cap = thin mist, fat = wide
-                mist.step(view: view, dt: dt, target: mistTarget,
-                          capScale: CGFloat(cap.deg / 13.0),
-                          color: state.colors[state.colorIndex])
-            }
         }
 
         // MARK: wall points — tap the FLAT spots; the wall passes through them
@@ -582,11 +563,11 @@ struct ARSprayView: UIViewRepresentable {
             let ci = CIImage(cvPixelBuffer: buf)
             // downscale hard + blur → the low-res, dreamy reflection you asked for
             let ctx = CIContext()
-            // 880 px + σ0.4: near-sharp base image; mips on the reflective
+            // 880 px + σ0.8: softly sharp base image; mips on the reflective
             // sampler supply the distance blur
             let scale: CGFloat = 880 / max(ci.extent.width, ci.extent.height)
             let small = ci.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-            let blurred = small.applyingGaussianBlur(sigma: 0.4).clamped(to: small.extent)
+            let blurred = small.applyingGaussianBlur(sigma: 0.8).clamped(to: small.extent)
             guard let cg = ctx.createCGImage(blurred, from: small.extent) else {
                 state.showToast("Reflection scan failed — try again")
                 return
@@ -659,18 +640,28 @@ final class PaintSurface {
     private let dripDirLocal: CGVector
     var canvasPx: CGFloat { PaintSurface.sizeMeters * PaintCanvas.ppm }
 
-    // paintable-area mask + wall-material grid, same 0.67 cm lattice
-    private let maskN = PaintCanvas.matN
-    private var mask: [Bool]
+    // paintable-area mask: 5400² one-bit lattice (0.22 cm cells) — fine
+    // enough that a clipped spray edge reads as a taped line, affordable
+    // (3.7 MB) because it is bits, not bytes
+    static let maskN = 5400
+    private static let maskWords = (maskN + 63) / 64
+    private var maskBits: [UInt64]
+    // wall materials stay on the coarser 1800 lattice — sheen regions don't
+    // need edge precision and the shader samples them linearly anyway
     private var mat: [UInt8]                     // 0 glossy · 1 rough · 2 bumpy
     private var maskAny = false
-    private var cellPx: CGFloat { canvasPx / CGFloat(maskN) }
+    // every lasso ever applied, replayed as vector paths by the editor viz —
+    // the overlay draws smooth curves, never grid cells
+    private var ops: [(poly: [CGPoint], tool: EditTool)] = []
+    private var maskCellPx: CGFloat { canvasPx / CGFloat(PaintSurface.maskN) }
+    private var matCellPx: CGFloat { canvasPx / CGFloat(PaintCanvas.matN) }
 
     // lasso editor visualisation
     private var vizCtx: CGContext?
+    private var matVizCtx: CGContext?
     private var vizMaterial: SCNMaterial?
     private var vizNode: SCNNode?
-    private let vizPx = 600                      // 1 px per mask cell
+    private let vizPx = 1024                     // vector fills — smooth at any res
 
     init(transform: simd_float4x4, followsAnchor: UUID?) {
         anchorTransform = transform
@@ -679,7 +670,7 @@ final class PaintSurface {
         rootNode.simdTransform = transform
         node.eulerAngles.x = -.pi / 2
         rootNode.addChildNode(node)
-        mask = .init(repeating: false, count: PaintCanvas.matN * PaintCanvas.matN)
+        maskBits = .init(repeating: 0, count: PaintSurface.maskN * PaintSurface.maskWords)
         mat = .init(repeating: 0, count: PaintCanvas.matN * PaintCanvas.matN)
 
         let downLocal = transform.inverse * simd_float4(0, -1, 0, 0)
@@ -824,16 +815,19 @@ final class PaintSurface {
     var maskIsEmpty: Bool { !maskAny }
 
     func contains(_ p: CGPoint) -> Bool {
-        let cx = Int(p.x / cellPx), cy = Int(p.y / cellPx)
-        guard cx >= 0, cy >= 0, cx < maskN, cy < maskN else { return false }
-        return mask[cy * maskN + cx]
+        let n = PaintSurface.maskN
+        let cx = Int(p.x / maskCellPx), cy = Int(p.y / maskCellPx)
+        guard cx >= 0, cy >= 0, cx < n, cy < n else { return false }
+        return maskBits[cy * PaintSurface.maskWords + (cx >> 6)]
+            & (UInt64(1) << UInt64(cx & 63)) != 0
     }
 
     /// Wall material under a canvas point: 0 glossy · 1 rough · 2 bumpy.
     func materialAt(_ p: CGPoint) -> UInt8 {
-        let cx = Int(p.x / cellPx), cy = Int(p.y / cellPx)
-        guard cx >= 0, cy >= 0, cx < maskN, cy < maskN else { return 0 }
-        return mat[cy * maskN + cx]
+        let n = PaintCanvas.matN
+        let cx = Int(p.x / matCellPx), cy = Int(p.y / matCellPx)
+        guard cx >= 0, cy >= 0, cx < n, cy < n else { return 0 }
+        return mat[cy * n + cx]
     }
 
     func seedSquare(center: CGPoint, halfMeters: CGFloat) {
@@ -844,44 +838,86 @@ final class PaintSurface {
                     CGPoint(x: center.x - h, y: center.y + h)], tool: .add)
     }
 
-    /// Photoshop-style lasso: rasterises the closed stroke into the mask
-    /// (+/−) or the material grid (glossy/rough/bumpy) per the active tool.
+    /// Photoshop-style lasso: recorded as a vector op (for the smooth editor
+    /// overlay) and rasterised into the mask bitset (+/−) or the material
+    /// grid (glossy/rough/bumpy) per the active tool.
     func applyLasso(_ texPts: [CGPoint], tool: EditTool) {
         guard texPts.count >= 3 else { return }
-        let poly = texPts.map { CGPoint(x: $0.x / cellPx, y: $0.y / cellPx) }
-        for cy in 0..<maskN {
-            let yc = CGFloat(cy) + 0.5
-            var xs: [CGFloat] = []
-            var j = poly.count - 1
-            for i in 0..<poly.count {
-                let a = poly[i], b = poly[j]
-                if (a.y > yc) != (b.y > yc) {
-                    xs.append(a.x + (yc - a.y) / (b.y - a.y) * (b.x - a.x))
-                }
-                j = i
+        ops.append((texPts, tool))
+        switch tool {
+        case .add, .cut:
+            rasterizeMask(texPts, set: tool == .add)
+        case .glossy, .rough, .bumpy:
+            rasterizeMat(texPts, value: tool == .glossy ? 0 : (tool == .rough ? 1 : 2))
+            canvas?.setMaterialGrid(mat)
+        }
+        redrawViz(stroke: nil, tool: tool)
+    }
+
+    /// Scanline crossings of a polygon row — shared by both rasterisers.
+    private func rowCrossings(_ poly: [CGPoint], _ yc: CGFloat) -> [CGFloat] {
+        var xs: [CGFloat] = []
+        var j = poly.count - 1
+        for i in 0..<poly.count {
+            let a = poly[i], b = poly[j]
+            if (a.y > yc) != (b.y > yc) {
+                xs.append(a.x + (yc - a.y) / (b.y - a.y) * (b.x - a.x))
             }
-            xs.sort()
+            j = i
+        }
+        xs.sort()
+        return xs
+    }
+
+    private func rasterizeMask(_ texPts: [CGPoint], set: Bool) {
+        let n = PaintSurface.maskN
+        let poly = texPts.map { CGPoint(x: $0.x / maskCellPx, y: $0.y / maskCellPx) }
+        for cy in 0..<n {
+            let xs = rowCrossings(poly, CGFloat(cy) + 0.5)
             var k = 0
             while k + 1 < xs.count {
                 let x0 = max(0, Int(xs[k].rounded(.down)))
-                let x1 = min(maskN - 1, Int(xs[k + 1].rounded(.up)))
+                let x1 = min(n - 1, Int(xs[k + 1].rounded(.up)))
+                if x0 <= x1 { fillBits(row: cy, x0: x0, x1: x1, set: set) }
+                k += 2
+            }
+        }
+        if set { maskAny = true }
+        else { maskAny = maskBits.contains { $0 != 0 } }
+    }
+
+    /// Set/clear a run of mask bits word-wise — a 5400-cell row is 85 ops,
+    /// not 5400.
+    private func fillBits(row: Int, x0: Int, x1: Int, set: Bool) {
+        let base = row * PaintSurface.maskWords
+        var i = x0
+        while i <= x1 {
+            let w = i >> 6
+            let bit = i & 63
+            let span = min(64 - bit, x1 - i + 1)
+            let word: UInt64 = span == 64
+                ? ~UInt64(0)
+                : ((UInt64(1) << UInt64(span)) - 1) << UInt64(bit)
+            if set { maskBits[base + w] |= word } else { maskBits[base + w] &= ~word }
+            i += span
+        }
+    }
+
+    private func rasterizeMat(_ texPts: [CGPoint], value: UInt8) {
+        let n = PaintCanvas.matN
+        let poly = texPts.map { CGPoint(x: $0.x / matCellPx, y: $0.y / matCellPx) }
+        for cy in 0..<n {
+            let xs = rowCrossings(poly, CGFloat(cy) + 0.5)
+            var k = 0
+            while k + 1 < xs.count {
+                let x0 = max(0, Int(xs[k].rounded(.down)))
+                let x1 = min(n - 1, Int(xs[k + 1].rounded(.up)))
                 if x0 <= x1 {
-                    switch tool {
-                    case .add:    for cx in x0...x1 { mask[cy * maskN + cx] = true }
-                    case .cut:    for cx in x0...x1 { mask[cy * maskN + cx] = false }
-                    case .glossy: for cx in x0...x1 { mat[cy * maskN + cx] = 0 }
-                    case .rough:  for cx in x0...x1 { mat[cy * maskN + cx] = 1 }
-                    case .bumpy:  for cx in x0...x1 { mat[cy * maskN + cx] = 2 }
-                    }
+                    for cx in x0...x1 { mat[cy * n + cx] = value }
                 }
                 k += 2
             }
         }
-        switch tool {
-        case .add, .cut: maskAny = mask.contains(true)
-        default: canvas?.setMaterialGrid(mat)
-        }
-        redrawViz(stroke: nil, tool: tool)
     }
 
     // MARK: lasso editor visuals
@@ -894,6 +930,13 @@ final class PaintSurface {
                                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
             vizCtx?.translateBy(x: 0, y: CGFloat(vizPx))
             vizCtx?.scaleBy(x: 1, y: -1)
+            // material tints get their own layer so a glossy lasso can erase
+            // them without touching the green mask underneath
+            matVizCtx = CGContext(data: nil, width: vizPx, height: vizPx,
+                                  bitsPerComponent: 8, bytesPerRow: 0, space: cs,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            matVizCtx?.translateBy(x: 0, y: CGFloat(vizPx))
+            matVizCtx?.scaleBy(x: 1, y: -1)
             let m = SCNMaterial()
             m.lightingModel = .constant
             m.isDoubleSided = true
@@ -928,44 +971,62 @@ final class PaintSurface {
         }
     }
 
+    /// The editor overlay is VECTOR: it replays every lasso op as a smooth
+    /// anti-aliased path fill (cut and glossy erase with .clear), so the
+    /// on-wall display shows curves, never grid cells — whatever the mask
+    /// resolution underneath.
     private func redrawViz(stroke: [CGPoint]?, tool: EditTool) {
         guard let ctx = vizCtx, vizNode?.parent != nil else { return }
-        ctx.clear(CGRect(x: 0, y: 0, width: vizPx, height: vizPx))
-        let s = CGFloat(vizPx) / CGFloat(maskN)
-        // mask as translucent green runs
-        ctx.setFillColor(UIColor(red: 0.35, green: 1.0, blue: 0.45, alpha: 0.18).cgColor)
-        for cy in 0..<maskN {
-            var cx = 0
-            while cx < maskN {
-                if mask[cy * maskN + cx] {
-                    var end = cx
-                    while end + 1 < maskN, mask[cy * maskN + end + 1] { end += 1 }
-                    ctx.fill(CGRect(x: CGFloat(cx) * s, y: CGFloat(cy) * s,
-                                    width: CGFloat(end - cx + 1) * s, height: s))
-                    cx = end + 1
-                } else { cx += 1 }
+        let full = CGRect(x: 0, y: 0, width: vizPx, height: vizPx)
+        ctx.clear(full)
+        let vscale = CGFloat(vizPx) / canvasPx
+
+        func path(_ poly: [CGPoint]) -> CGPath {
+            let p = CGMutablePath()
+            p.move(to: CGPoint(x: poly[0].x * vscale, y: poly[0].y * vscale))
+            for pt in poly.dropFirst() {
+                p.addLine(to: CGPoint(x: pt.x * vscale, y: pt.y * vscale))
             }
+            p.closeSubpath()
+            return p
         }
-        // material regions: rough tints yellow, bumpy tints blue
-        let matTints: [(UInt8, UIColor)] = [
-            (1, UIColor(red: 1.00, green: 0.85, blue: 0.20, alpha: 0.16)),
-            (2, UIColor(red: 0.30, green: 0.60, blue: 1.00, alpha: 0.18)),
-        ]
-        for (val, tint) in matTints {
-            ctx.setFillColor(tint.cgColor)
-            for cy in 0..<maskN {
-                var cx = 0
-                while cx < maskN {
-                    if mat[cy * maskN + cx] == val {
-                        var end = cx
-                        while end + 1 < maskN, mat[cy * maskN + end + 1] == val { end += 1 }
-                        ctx.fill(CGRect(x: CGFloat(cx) * s, y: CGFloat(cy) * s,
-                                        width: CGFloat(end - cx + 1) * s, height: s))
-                        cx = end + 1
-                    } else { cx += 1 }
+
+        // paintable area: + fills green, − erases
+        for op in ops where op.tool == .add || op.tool == .cut {
+            ctx.addPath(path(op.poly))
+            ctx.setBlendMode(op.tool == .add ? .normal : .clear)
+            ctx.setFillColor(UIColor(red: 0.35, green: 1.0, blue: 0.45, alpha: 0.18).cgColor)
+            ctx.fillPath()
+        }
+        ctx.setBlendMode(.normal)
+
+        // material tints on their own layer: rough yellow, bumpy blue,
+        // glossy erases — composited over the mask
+        if let mctx = matVizCtx {
+            mctx.clear(full)
+            for op in ops {
+                switch op.tool {
+                case .add, .cut: continue
+                case .glossy: mctx.setBlendMode(.clear)
+                case .rough:
+                    mctx.setBlendMode(.normal)
+                    mctx.setFillColor(UIColor(red: 1.00, green: 0.85, blue: 0.20, alpha: 0.16).cgColor)
+                case .bumpy:
+                    mctx.setBlendMode(.normal)
+                    mctx.setFillColor(UIColor(red: 0.30, green: 0.60, blue: 1.00, alpha: 0.18).cgColor)
                 }
+                mctx.addPath(path(op.poly))
+                mctx.fillPath()
+            }
+            mctx.setBlendMode(.normal)
+            if let img = mctx.makeImage() {
+                ctx.saveGState()
+                ctx.concatenate(ctx.ctm.inverted())     // device space: no double flip
+                ctx.draw(img, in: full)
+                ctx.restoreGState()
             }
         }
+
         // the live lasso stroke, coloured by the active tool
         if let stroke = stroke, stroke.count >= 2 {
             ctx.setStrokeColor(PaintSurface.strokeColor(tool).cgColor)
@@ -994,165 +1055,4 @@ extension simd_float4x4 {
 
 @inline(__always) func vec4(_ v: simd_float3, _ w: Float) -> simd_float4 {
     simd_float4(v.x, v.y, v.z, w)
-}
-
-// MARK: - MistField: spray mist that lives IN the scene
-
-/// Faint puffs of the paint colour climb fast from the bottom of the screen
-/// and die where the paint is landing. The target is the projected screen
-/// position of the WORLD point being sprayed, recomputed every frame — pan
-/// the camera and the trail bends toward the paint: the fox-tail. Three
-/// bands of size/speed/life give the parallax depth.
-///
-/// The puffs are billboarded planes in the scene (not a view-layer overlay):
-/// the render loop owns them, no cross-thread traffic, and they land in
-/// recordings — view.snapshot() never captures CALayer overlays, which is
-/// one of the reasons the old CAEmitter mist could never have worked.
-final class MistField {
-    private struct Puff {
-        var node: SCNNode
-        var pos: CGPoint          // simulated in screen points
-        var t: Double             // 0…1 lifetime progress
-        var life: Double
-        var chase: CGFloat        // how hard it homes on the target
-        var rise: CGFloat         // initial upward speed, pt/s
-        var size: CGFloat         // metres at the mist plane depth
-        var alpha: CGFloat
-        var drift: CGFloat        // sideways wander, pt/s
-    }
-
-    private let depth: Float = 0.6            // mist plane, metres before camera
-    private let maxPuffs = 90
-    private var pool: [SCNNode] = []
-    private var free: [SCNNode] = []
-    private var live: [Puff] = []
-    private var colorKey = -1
-    private var sprite: CGImage?
-    private var spawnPhase = 0
-
-    // near/fast/big → far/slow/small: (life s, chase, rise pt/s, size m, alpha)
-    // 5× faster than v1 per Oskars — the old speed lagged far behind how fast
-    // paint lands on the wall. Alphas kept faint: mist should be felt, not seen.
-    private let bands: [(Double, CGFloat, CGFloat, CGFloat, CGFloat)] = [
-        (0.08, 45.0, 1300, 0.052, 0.15),
-        (0.11, 30.0, 1000, 0.036, 0.11),
-        (0.15, 20.0,  750, 0.024, 0.08),
-    ]
-    private var capScale: CGFloat = 1
-
-    /// Call once per frame from the render tick. `target` non-nil = spraying.
-    /// `capScale` ~ cap cone vs Beef: the plume matches the cap's spray size.
-    func step(view: ARSCNView, dt: Double, target: CGPoint?,
-              capScale: CGFloat, color: UIColor) {
-        guard let pov = view.pointOfView else { return }
-        self.capScale = min(1.5, max(0.3, capScale))
-        if let target = target {
-            retint(color)
-            spawn(view: view, target: target)
-            spawn(view: view, target: target)
-        }
-        guard !live.isEmpty else { return }
-
-        // one reference projection supplies the depth for unprojecting the
-        // screen-space simulation back onto the mist plane
-        let refWorld = pov.simdConvertPosition(simd_float3(0, 0, -depth), to: nil)
-        let z01 = view.projectPoint(SCNVector3(refWorld.x, refWorld.y, refWorld.z)).z
-
-        for i in stride(from: live.count - 1, through: 0, by: -1) {
-            var p = live[i]
-            p.t += dt / p.life
-            if p.t >= 1 { recycle(i); continue }
-            if let target = target,
-               hypot(target.x - p.pos.x, target.y - p.pos.y) < 14 { recycle(i); continue }
-            let fade = CGFloat(1 - p.t)
-            // the climb dies as the homing takes over — that blend is the tail
-            p.pos.y -= p.rise * CGFloat(dt) * fade
-            p.pos.x += p.drift * CGFloat(dt) * fade
-            if let target = target {
-                let k = min(1, CGFloat(dt) * p.chase * CGFloat(p.t))
-                p.pos.x += (target.x - p.pos.x) * k
-                p.pos.y += (target.y - p.pos.y) * k
-            }
-            let world = view.unprojectPoint(SCNVector3(Float(p.pos.x), Float(p.pos.y), z01))
-            p.node.simdPosition = simd_float3(world.x, world.y, world.z)
-            let s = Float(p.size * (1 + CGFloat(p.t) * 1.4))
-            p.node.simdScale = simd_float3(s, s, s)
-            p.node.opacity = p.alpha * (p.t < 0.15 ? CGFloat(p.t) / 0.15 : fade)
-            live[i] = p
-        }
-    }
-
-    private func spawn(view: ARSCNView, target: CGPoint) {
-        guard let node = free.popLast() ?? makeNode(view: view) else { return }
-        spawnPhase = (spawnPhase + 1) % bands.count
-        let b = bands[spawnPhase]
-        node.isHidden = false
-        node.opacity = 0
-        let spread = 70 * capScale
-        live.append(Puff(node: node,
-                         pos: CGPoint(x: target.x + CGFloat.random(in: -spread...spread),
-                                      y: view.bounds.height + 20),
-                         t: 0, life: b.0, chase: b.1,
-                         rise: b.2 * CGFloat.random(in: 0.8...1.25),
-                         size: b.3 * CGFloat.random(in: 0.8...1.3) * capScale,
-                         alpha: b.4,
-                         drift: CGFloat.random(in: -30...30)))
-    }
-
-    private func makeNode(view: ARSCNView) -> SCNNode? {
-        guard pool.count < maxPuffs else { return nil }
-        let plane = SCNPlane(width: 1, height: 1)
-        let m = SCNMaterial()
-        m.lightingModel = .constant
-        m.diffuse.contents = sprite
-        m.transparencyMode = .aOne
-        m.writesToDepthBuffer = false
-        m.readsFromDepthBuffer = false
-        m.isDoubleSided = true
-        plane.materials = [m]
-        let n = SCNNode(geometry: plane)
-        n.renderingOrder = 10_000
-        n.constraints = [SCNBillboardConstraint()]
-        n.isHidden = true
-        view.scene.rootNode.addChildNode(n)
-        pool.append(n)
-        return n
-    }
-
-    private func recycle(_ i: Int) {
-        live[i].node.isHidden = true
-        free.append(live[i].node)
-        live.remove(at: i)
-    }
-
-    /// Alpha-blended, not additive — additive mist vanishes on dark paint,
-    /// and black is half this app's palette.
-    private func retint(_ c: UIColor) {
-        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-        c.getRed(&r, green: &g, blue: &b, alpha: &a)
-        let key = Int(r * 255) << 16 | Int(g * 255) << 8 | Int(b * 255)
-        guard key != colorKey else { return }
-        colorKey = key
-        sprite = MistField.dot(r: r, g: g, b: b)
-        for n in pool { n.geometry?.firstMaterial?.diffuse.contents = sprite }
-    }
-
-    private static func dot(r: CGFloat, g: CGFloat, b: CGFloat) -> CGImage? {
-        let size = 64
-        let cs = CGColorSpaceCreateDeviceRGB()
-        guard let ctx = CGContext(data: nil, width: size, height: size,
-                                  bitsPerComponent: 8, bytesPerRow: 0, space: cs,
-                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
-        else { return nil }
-        // faint core, early fade-out: gas haze toned right down — subtle
-        let colors = [UIColor(red: r, green: g, blue: b, alpha: 0.45).cgColor,
-                      UIColor(red: r, green: g, blue: b, alpha: 0).cgColor] as CFArray
-        if let grad = CGGradient(colorsSpace: cs, colors: colors, locations: [0, 0.7]) {
-            ctx.drawRadialGradient(grad,
-                                   startCenter: CGPoint(x: 32, y: 32), startRadius: 0,
-                                   endCenter: CGPoint(x: 32, y: 32), endRadius: 32,
-                                   options: [])
-        }
-        return ctx.makeImage()
-    }
 }
